@@ -666,11 +666,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > currentTerm || rf.getState() != Follower {
 		rf.becomeFollower(args.Term)
 	}
-	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	if args.LeaderCommit > rf.commitIndex {
-		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.Log[len(rf.Log)-1].Index))
-		rf.applyMsgs(rf.applyCh)
-	}
 
 	// reply
 	if isHeartbeat {
@@ -683,14 +678,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.Log)-1 {
 		lablog.Debug(rf.me, lablog.Append, "not success 1 prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
 		reply.Success = false
+		return
 	} else if args.PrevLogIndex >= 0 && (len(rf.Log)-1 >= args.PrevLogIndex) && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.Log[args.PrevLogIndex].Term)
 		// If an existing entry conflicts with a new one (same index but different terms)
 		reply.Success = false
+		return
 	} else {
 		lablog.Debug(rf.me, lablog.Append, "append logs %+v", args.Logs)
 		rf.appendLogs(args.PrevLogIndex, args.Logs) // delete the existing entry and all that follow it and Append any new entries not already in the log
 		reply.Success = true
+	}
+	// only when success
+	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.Log[len(rf.Log)-1].Index))
+		rf.applyMsgs(rf.applyCh)
 	}
 }
 
