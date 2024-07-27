@@ -32,7 +32,10 @@ import (
 // 6.824: The tester requires that the leader send heartbeat RPCs no more than ten times per second.
 const (
 	leaderHeartbeatIntervalMs = 100
-	// should keep enough range to avoid split vote
+	// Raft uses randomized election timeouts to ensure that split votes are rare and that they are resolved quickly.
+	// To prevent split votes in the first place, election timeouts are chosen randomly from a fixed interval.
+	// Make sure the election timeouts in different peers don't always fire at the same time,
+	// or else all peers will vote only for themselves and no one will become the leader.
 	electinTimeoutMinMs = 600
 	electinTimeoutMaxMs = 1000
 )
@@ -75,7 +78,6 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	raftState
-	Log []LogEntry
 
 	// channels for state machine
 	stepDownCh    chan bool
@@ -170,10 +172,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	currTerm := rf.getCurrentTerm()
 	reply.Term = currTerm
 	reply.VoteGranted = false
+	killed := rf.killed()
+	rf.mu.Unlock()
 
 	// receiving outdated vote req || should not send vote request to node itself
-	if args.Term < currTerm || args.CandidateId == int32(rf.me) || rf.killed() {
-		rf.mu.Unlock()
+	if args.Term < currTerm || args.CandidateId == int32(rf.me) || killed {
 		return
 	}
 	// becomes follower and reset votefor
@@ -334,7 +337,7 @@ func (rf *Raft) ticker() {
 				// cancel the operation when it becomes follower
 			case <-time.After(leaderHeartbeatIntervalMs * time.Millisecond):
 				rf.mu.Lock()
-				// rf.appendEntries()
+				rf.appendEntries()
 				rf.mu.Unlock()
 			}
 		case Follower:
@@ -343,6 +346,7 @@ func (rf *Raft) ticker() {
 				// simply reset timer
 			case <-time.After(rf.getElectionTimeout()):
 				rf.mu.Lock()
+				lablog.Debug(rf.me, lablog.Timer, "election timeout, becoming candidate and start election")
 				rf.becomeCandidate()
 				rf.mu.Unlock()
 			}
@@ -400,10 +404,23 @@ func (rf *Raft) becomeCandidate() {
 	rf.resetChs()
 	rf.setState(Candidate)
 }
-func (r *Raft) resetChs() {
-	r.winElectionCh = make(chan bool)
-	r.stepDownCh = make(chan bool)
-	r.heartbeatCh = make(chan bool)
+func (rf *Raft) resetChs() {
+	rf.resetCh(rf.winElectionCh)
+	rf.resetCh(rf.stepDownCh)
+	rf.resetCh(rf.heartbeatCh)
+}
+
+// clean up the channel
+// cannot simply replace with a new channle, will cause data race.
+func (r *Raft) resetCh(ch chan bool) {
+L:
+	for {
+		select {
+		case <-ch:
+		default:
+			break L
+		}
+	}
 }
 
 // becomeLeader changes the state of the Raft server to Leader.
@@ -417,6 +434,96 @@ func (rf *Raft) becomeLeader() {
 	rf.setState(Leader)
 }
 
+// appendEntries sends AppendEntries RPCs to all peers
+func (rf *Raft) appendEntries() {
+	for nodeId := range rf.peers {
+		if nodeId != rf.me {
+			args := rf.getAppendEntriesArgs(rf.getCurrentTerm())
+			lablog.Debug(rf.me, lablog.Append, "appendEntries to node %d, %+v", nodeId, *args)
+
+			go func(nodeId int) {
+				reply := rf.sendAppendEntries(nodeId, args)
+				// If RPC request or response contains term T > currentTerm:
+				// set currentTerm = T, convert to follower (§5.1)
+				if reply.Term > args.Term {
+					rf.mu.Lock()
+					rf.becomeFollower(reply.Term)
+					rf.mu.Unlock()
+					return
+				}
+			}(nodeId)
+		}
+	}
+}
+
+// getAppendEntriesArgs returns the AppendEntriesArgs for the given term and nodeId
+func (rf *Raft) getAppendEntriesArgs(term int32) *AppendEntriesArgs {
+	args := &AppendEntriesArgs{
+		Term:     term,
+		LeaderId: int32(rf.me),
+	}
+
+	return args
+}
+
+func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) *AppendEntriesReply {
+	lablog.Debug(rf.me, lablog.Heart, "send append entries to node %d", nodeId)
+	reply := &AppendEntriesReply{}
+	ok := rf.peers[nodeId].Call("Raft.AppendEntries", args, reply)
+	if !ok {
+		lablog.Debug(rf.me, lablog.Error, "append entries to node %d at term %d was dropped", nodeId, args.Term)
+		for !ok {
+			// beware of the retry could loop forever even after the term has been updated
+			rf.mu.Lock()
+			shouldSend := !rf.killed() && rf.getState() == Leader && rf.getCurrentTerm() == args.Term
+			rf.mu.Unlock()
+			if !shouldSend {
+				return reply
+			}
+			ok = rf.peers[nodeId].Call("Raft.AppendEntries", args, reply)
+		}
+	}
+	return reply
+}
+
+type AppendEntriesArgs struct {
+	Term     int32
+	LeaderId int32
+}
+
+type AppendEntriesReply struct {
+	Success bool
+	Term    int32
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	currentTerm := rf.getCurrentTerm()
+	rf.mu.Unlock()
+	lablog.Debug(rf.me, lablog.Heart, "receive heartbeat from leader %d. %+v at currentTerm=%d", args.LeaderId, *args, currentTerm)
+	reply.Success = false
+	reply.Term = currentTerm
+
+	if args.Term < currentTerm {
+		return
+	}
+	// Current terms are exchanged whenever servers communicate;
+	// if one server’s currentterm is smaller than the other’s, then it updates its current term to the larger value.
+	rf.setCurrentTerm(args.Term)
+
+	if args.Term > currentTerm {
+		rf.mu.Lock()
+		rf.becomeFollower(args.Term)
+		rf.mu.Unlock()
+	}
+	reply.Success = true
+
+	// to reset election timeout
+	if rf.getState() == Follower {
+		rf.heartbeatCh <- true
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -428,10 +535,15 @@ func (rf *Raft) becomeLeader() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
+	rf := &Raft{
+		peers:         peers,
+		persister:     persister,
+		me:            me,
+		raftState:     newRaftState(),
+		stepDownCh:    make(chan bool),
+		winElectionCh: make(chan bool),
+		heartbeatCh:   make(chan bool),
+	}
 
 	// Your initialization code here (2A, 2B, 2C).
 

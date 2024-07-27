@@ -32,6 +32,8 @@ const (
 	Vote   LogTopic = "VOTE"
 	Timer  LogTopic = "TIMR"
 	Leader LogTopic = "LEAD"
+	Append LogTopic = "APND"
+	Error  LogTopic = "ERRO"
 )
 
 var debugStart time.Time

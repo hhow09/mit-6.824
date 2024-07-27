@@ -39,6 +39,17 @@ type raftState struct {
 	dead        int32 // set by Kill()
 
 	votedFor int32 // candidateId that received vote in current term (or null if none)
+	Log      []LogEntry
+}
+
+func newRaftState() raftState {
+	return raftState{
+		state:       Follower,
+		currentTerm: 0,
+		dead:        0,
+		votedFor:    voteForNull,
+		Log:         nil,
+	}
 }
 
 // get the current state of the raft node
