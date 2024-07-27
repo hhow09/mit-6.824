@@ -14,7 +14,7 @@ const (
 
 const Debug = true
 
-const tmpFolderPath = "./mr-tmp"
+const tmpFolderPath = ""
 
 func DPrintf(format string, v ...interface{}) {
 	if Debug {
@@ -34,4 +34,8 @@ type Task struct {
 func reduceName(mapIdx, reduceIdx int) string {
 	//%d for integer base-10
 	return fmt.Sprintf("mr-%d-%d", mapIdx, reduceIdx)
+}
+
+func mergeName(reduceIdx int) string {
+	return fmt.Sprintf("mr-out-%d", reduceIdx)
 }

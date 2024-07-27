@@ -24,7 +24,8 @@ const (
 )
 
 type TaskStat struct {
-	Status int
+	Status    int
+	StartTime time.Time
 }
 
 type Coordinator struct {
@@ -51,7 +52,7 @@ func (c *Coordinator) getTask(taskSeq int) Task {
 		Phase:    c.taskPhase,
 		Alive:    true,
 	}
-	DPrintf("getTask, c:%+v, taskSeq:%d, lenfiles:%d, lents:%d", c, taskSeq, len(c.files), len(c.taskStats))
+	DPrintf("getTask, taskSeq:%d, lenfiles:%d, lents:%d", taskSeq, len(c.files), len(c.taskStats))
 	if task.Phase == MapPhase {
 		task.FileName = c.files[taskSeq]
 	}
@@ -81,6 +82,12 @@ func (c *Coordinator) schedule() {
 		case TaskStatusRunning:
 			allFinished = false
 
+			//handle worker crash
+			if time.Since(t.StartTime) > MaxTaskRunTime {
+				c.taskStats[index].Status = TaskStatusQueue
+				c.taskCh <- c.getTask(index)
+			}
+
 		case TaskStatusFinish:
 
 		case TaskStatusErr:
@@ -96,6 +103,7 @@ func (c *Coordinator) schedule() {
 		if c.taskPhase == MapPhase {
 			c.initReduceTask()
 		} else {
+			DPrintf("ReducePhase allFinished")
 			c.done = true
 		}
 	}
@@ -117,12 +125,28 @@ func (c *Coordinator) RegWorker(args *RegisterArgs, reply *RegisterReply) error 
 }
 
 func (c *Coordinator) GetOneTask(args *TaskArgs, reply *TaskReply) error {
-	DPrintf("Coordinator.GetOneTask")
+	DPrintf("Coordinator.GetOneTask %+v", args)
+	// if task channel is empty, worker calling GetOneTask will wait here until there is new task comes in.
+	// It is called when only some worker is done
 	task := <-c.taskCh
 	reply.Task = &task
+	if task.Alive {
+		c.regTask(&task)
+	}
 
 	return nil
+}
 
+func (c *Coordinator) regTask(task *Task) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	DPrintf("Coordinator.regTask")
+
+	if task.Phase != c.taskPhase {
+		panic("task phase != Coordinator phase")
+	}
+	c.taskStats[task.Seq].Status = TaskStatusRunning
+	c.taskStats[task.Seq].StartTime = time.Now()
 }
 
 func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) error {
@@ -131,12 +155,18 @@ func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) e
 
 	DPrintf("ReportTask, get report task:%+v, taskPhase:%+v", args, c.taskPhase)
 
-	//TODO error handling
+	// update taskStats: Done or Error
+	if c.taskPhase != args.Phase {
+		return nil
+	}
 
-	//update taskStats: Done or Error
-	// if args
+	if args.Done {
+		c.taskStats[args.Seq].Status = TaskStatusFinish
+	} else {
+		c.taskStats[args.Seq].Status = TaskStatusErr
+	}
 
-	// go c.schedule()
+	go c.schedule()
 	return nil
 }
 
@@ -159,7 +189,6 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	//TODO why Lock
 	return c.done
 }
 
@@ -169,9 +198,8 @@ func (c *Coordinator) initMapTask() {
 }
 
 func (c *Coordinator) initReduceTask() {
-	DPrintf("init ReduceTask")
-	// c.taskPhase = ReducePhase
-	// c.taskStats = make([]TaskStat, c.nReduce)
+	c.taskPhase = ReducePhase
+	c.taskStats = make([]TaskStat, c.nReduce)
 }
 
 func (c *Coordinator) tickSchedule() {
@@ -191,6 +219,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.nReduce = nReduce
 	c.files = files
 
+	//make an buffered channel in order not to block other goroutines
 	if nReduce > len(files) {
 		c.taskCh = make(chan Task, nReduce)
 	} else {

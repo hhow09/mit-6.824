@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Map functions return a slice of KeyValue.
@@ -37,7 +38,6 @@ type worker struct {
 
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
 	w := worker{
 		mapf:    mapf,
 		reducef: reducef,
@@ -135,12 +135,6 @@ func (w *worker) doMapTask(t Task) {
 	for idx, el := range reduces {
 		fileName := reduceName(t.Seq, idx)
 
-		//create folder if not exist, then change permission
-		if _, err := os.Stat(tmpFolderPath); os.IsNotExist(err) {
-			err := os.Mkdir(tmpFolderPath, 0777)
-			os.Chmod(tmpFolderPath, 0777)
-			w.reportTask(t, false, err)
-		}
 		//create files inside folderPath
 		newFile, err := os.Create(filepath.Join(tmpFolderPath, fileName))
 		if err != nil {
@@ -162,7 +156,35 @@ func (w *worker) doMapTask(t Task) {
 }
 
 func (w *worker) doReduceTask(t Task) {
-	//TODO
+	maps := make(map[string][]string) // Declare an empty key-value map
+	for i := 0; i < t.NMaps; i++ {
+		fileName := filepath.Join(tmpFolderPath, reduceName(i, t.Seq))
+		file, err := os.Open(fileName)
+		if err != nil {
+			w.reportTask(t, false, err)
+			return
+		}
+		decoder := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := decoder.Decode(&kv); err != nil {
+				break
+			}
+			if _, exist := maps[kv.Key]; !exist {
+				maps[kv.Key] = make([]string, 0, 100)
+			}
+			maps[kv.Key] = append(maps[kv.Key], kv.Value)
+			// { key1: [1,1,1,1,1], key2:[1,1,2,1,1], ... }
+		}
+	}
+	res := make([]string, 0, 100)
+	for k, v := range maps {
+		res = append(res, fmt.Sprintf("%v %v\n", k, w.reducef(k, v)))
+	}
+	if err := ioutil.WriteFile(mergeName(t.Seq), []byte(strings.Join(res, "")), 0600); err != nil {
+		w.reportTask(t, false, err)
+	}
+	w.reportTask(t, true, nil)
 }
 
 func (w *worker) reportTask(t Task, done bool, err error) {
@@ -198,6 +220,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	fmt.Printf("error in call %s: %v\n", rpcname, err)
 	return false
 }
