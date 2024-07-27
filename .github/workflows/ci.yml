@@ -1,0 +1,22 @@
+name: CI
+on:
+  push:
+
+concurrency: 
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  tests:
+    runs-on: ubuntu-latest   
+    steps:
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: ./src/go.mod
+        id: go
+      - name: Run Lab 2 tests
+        run: |
+          cd src
+          ./test.sh
