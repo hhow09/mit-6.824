@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"sync/atomic"
 )
 
@@ -40,6 +41,19 @@ type raftState struct {
 
 	votedFor int32 // candidateId that received vote in current term (or null if none)
 	Log      []LogEntry
+	// index of highest log entry known to be committed (initialized to 0, increases monotonically)
+	commitIndex int
+
+	// index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+	lastApplied int
+
+	// Volatile state on leaders:
+	// next log index to replicate to follower
+	//  (initialized to leader last log index + 1)
+	nextIndex []int
+	// for each server, index of highest log entry known to be replicated on server
+	// (initialized to 0, increases monotonically)
+	matchIndex []int
 }
 
 func newRaftState() raftState {
@@ -48,7 +62,12 @@ func newRaftState() raftState {
 		currentTerm: 0,
 		dead:        0,
 		votedFor:    voteForNull,
-		Log:         nil,
+		// keep a dummy entry
+		Log: []LogEntry{
+			{Term: 0, Index: 0, Command: nil},
+		},
+		nextIndex:   nil, // nil for follower
+		commitIndex: 0,
 	}
 }
 
@@ -79,9 +98,88 @@ func (r *raftState) setVotedFor(val int32) {
 	atomic.StoreInt32(&r.votedFor, val)
 }
 
-func (rf *raftState) lastLogTermAndIndex() (int, int) {
-	// TODO: implement this when log is implemented
+func (rf *raftState) lastLogTermAndIndex() (int32, int) {
+	if len(rf.Log) > 0 {
+		return rf.Log[len(rf.Log)-1].Term, len(rf.Log) - 1
+	}
 	return 0, -1
+}
+
+func (rf *raftState) setNextIndex(nextIdx []int) {
+	rf.nextIndex = nextIdx
+}
+
+func (rf *raftState) setNodeNextIndex(nodeID, nextIdx int) error {
+	if len(rf.nextIndex) == 0 {
+		return errors.New("empty nextIndex")
+	}
+	if nodeID < 0 || nodeID >= len(rf.nextIndex) {
+		return errors.New("invalid node ID")
+	}
+	if nextIdx <= 0 {
+		return errors.New("invalid next index")
+	}
+	rf.nextIndex[nodeID] = nextIdx
+	return nil
+}
+
+func (rf *raftState) setMatchIndex(matchIdx []int) {
+	rf.matchIndex = matchIdx
+}
+
+func (rf *raftState) setNodeMatchIndex(nodeID, matchIdx int) error {
+	if len(rf.matchIndex) == 0 {
+		return errors.New("empty matchIndex")
+	}
+	if nodeID < 0 || nodeID >= len(rf.matchIndex) {
+		return errors.New("invalid node ID")
+	}
+	rf.matchIndex[nodeID] = matchIdx
+	return nil
+}
+
+// append the log entry to the log state and return the appended index
+func (r *raftState) appendLog(le LogEntry) (index int) {
+	le.Index = len(r.Log)
+	r.Log = append(r.Log, le)
+	return len(r.Log) - 1
+}
+
+// append the log entry to the log state and return the appended index
+func (r *raftState) appendLogs(idx int, les []LogEntry) {
+	r.Log = append(r.Log[0:idx+1], les...)
+}
+
+func (rf *raftState) setCommitIndex(i int) {
+	rf.commitIndex = i
+}
+
+// If commitIndex > lastApplied: increment lastApplied,
+// apply log[lastApplied] to state machine (§5.3)
+func (rf *raftState) applyMsgs(applyCh chan ApplyMsg) {
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied++
+		msg := ApplyMsg{
+			CommandValid: true,
+			Command:      rf.Log[rf.lastApplied].Command,
+			CommandIndex: rf.lastApplied,
+		}
+		applyCh <- msg
+	}
+}
+
+func (rf *raftState) getNodeEntries(nodeID int) ([]LogEntry, *LogEntry) {
+	nextIdx := rf.nextIndex[nodeID]
+	if nextIdx >= len(rf.Log) {
+		if nextIdx == len(rf.Log) && len(rf.Log) > 0 {
+			return nil, &rf.Log[len(rf.Log)-1]
+		}
+		return nil, nil
+	}
+	if nextIdx > 0 {
+		return rf.Log[nextIdx:], &rf.Log[nextIdx-1]
+	}
+	return rf.Log[nextIdx:], nil
 }
 
 // dead

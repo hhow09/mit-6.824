@@ -62,8 +62,9 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-	Index int
-	Term  int
+	Index   int
+	Term    int32
+	Command interface{}
 }
 
 // A Go object implementing a single Raft peer.
@@ -83,6 +84,7 @@ type Raft struct {
 	stepDownCh    chan bool
 	winElectionCh chan bool
 	heartbeatCh   chan bool
+	applyCh       chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -151,7 +153,8 @@ type RequestVoteArgs struct {
 	Term         int32
 	CandidateId  int32
 	LastLogIndex int
-	LastLogTerm  int
+	LastLogTerm  int32
+	LeaderCommit int // leader’s commitIndex
 }
 
 // example RequestVote RPC reply structure.
@@ -172,11 +175,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	currTerm := rf.getCurrentTerm()
 	reply.Term = currTerm
 	reply.VoteGranted = false
-	killed := rf.killed()
-	rf.mu.Unlock()
 
 	// receiving outdated vote req || should not send vote request to node itself
-	if args.Term < currTerm || args.CandidateId == int32(rf.me) || killed {
+	if args.Term < currTerm || args.CandidateId == int32(rf.me) || rf.killed() {
+		rf.mu.Unlock()
 		return
 	}
 	// becomes follower and reset votefor
@@ -186,20 +188,50 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	votedFor := rf.getVotedFor()
 	canVoteForThisCandidate := (votedFor == voteForNull || votedFor == args.CandidateId)
-	if canVoteForThisCandidate {
+	// prevents a candidate with an outdated log from becoming leader.
+	ismoreUpToDate := (len(rf.Log) == 0 || rf.isMoreUpToDate(args.LastLogTerm, args.LastLogIndex))
+	if canVoteForThisCandidate && ismoreUpToDate {
 		lablog.Debug(rf.me, lablog.Vote, "grant vote to candidate=%d at Term %d", args.CandidateId, args.Term)
 		reply.VoteGranted = true
+		// follower need to remember which candidate it voted
+		// persist votedFor to avoid voting twice within one term
 		rf.setVotedFor(args.CandidateId)
 	}
+	rf.mu.Unlock()
+	// IMPORTANT: to reset election timeout
+	// otherwise, the follower will frequently timeout and start a new election
+	rf.heartbeatCh <- true
+}
+
+// isMoreUpToDate determines if the given (term, lastIndex) log is more up-to-date by comparing the index
+// and term of the last entries in the existing logs.
+// If the logs have last entries with different terms, then the log with the later term is more up-to-date.
+// If the logs end with the same term, then whichever log has the larger lastIndex is more up-to-date.
+// If the logs are the same, the given log is up-to-date.
+func (rf *Raft) isMoreUpToDate(reqTerm int32, reqIdx int) bool {
+	lastLogTerm, lastLogIdx := rf.lastLogTermAndIndex()
+	if reqTerm != lastLogTerm {
+		return reqTerm > lastLogTerm
+	}
+	// if the terms are the same and the candidate’s log contains at least as many entries as the
+	// recipient’s log.
+	return reqIdx >= lastLogIdx
 }
 
 // becomeFollower changes the state of the Raft server to Follower.
 // only call while holding the lock
 func (rf *Raft) becomeFollower(term int32) {
 	lablog.Debug(rf.me, lablog.Info, "become follower at term=%d", term)
+	rf.resetChs()
+	prevState := rf.getState()
 	rf.setState(Follower)
-	rf.setCurrentTerm(term)
 	rf.setVotedFor(voteForNull)
+	rf.setCurrentTerm(term)
+	rf.setNextIndex(nil)  // leader only state
+	rf.setMatchIndex(nil) // leader only state
+	if prevState != Follower {
+		rf.stepDownCh <- true
+	}
 }
 
 // request vote which save response grant to chan
@@ -308,13 +340,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index := -1
 
-	return index, term, isLeader
+	isLeader := rf.getState() == Leader
+	if !isLeader || rf.killed() {
+		return index, 0, isLeader
+	}
+	term := rf.getCurrentTerm()
+	le := LogEntry{
+		Term:    term,
+		Command: command,
+	}
+	appendedIndex := rf.appendLog(le)
+	lablog.Debug(rf.me, lablog.Start, "start agreement on command %+v at index %d", command, appendedIndex)
+	return appendedIndex, int(term), isLeader
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -432,17 +475,24 @@ func (rf *Raft) becomeLeader() {
 	)
 	rf.resetChs()
 	rf.setState(Leader)
+	// initialized to leader last log index + 1
+	initNextIndex := make([]int, len(rf.peers))
+	for i := range initNextIndex {
+		initNextIndex[i] = len(rf.Log)
+	}
+	rf.setNextIndex(initNextIndex)
+	rf.setMatchIndex(make([]int, len(rf.peers)))
 }
 
 // appendEntries sends AppendEntries RPCs to all peers
 func (rf *Raft) appendEntries() {
-	for nodeId := range rf.peers {
-		if nodeId != rf.me {
-			args := rf.getAppendEntriesArgs(rf.getCurrentTerm())
-			lablog.Debug(rf.me, lablog.Append, "appendEntries to node %d, %+v", nodeId, *args)
+	for nodeID := range rf.peers {
+		if nodeID != rf.me {
+			args := rf.getAppendEntriesArgs(rf.getCurrentTerm(), nodeID)
+			lablog.Debug(rf.me, lablog.Append, "appendEntries to node %d, %+v", nodeID, *args)
 
-			go func(nodeId int) {
-				reply := rf.sendAppendEntries(nodeId, args)
+			go func(nodeID int) {
+				reply := rf.sendAppendEntries(nodeID, args)
 				// If RPC request or response contains term T > currentTerm:
 				// set currentTerm = T, convert to follower (§5.1)
 				if reply.Term > args.Term {
@@ -451,18 +501,92 @@ func (rf *Raft) appendEntries() {
 					rf.mu.Unlock()
 					return
 				}
-			}(nodeId)
+
+				retryArgsCopied := *args
+				retryArgs := &retryArgsCopied
+				for !reply.Success {
+					if reply.Term > args.Term {
+						rf.mu.Lock()
+						rf.becomeFollower(reply.Term)
+						rf.mu.Unlock()
+						return
+					}
+
+					lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", args.Term, nodeID)
+					// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
+					if retryArgs.PrevLogIndex <= 0 {
+						return
+					}
+					rf.mu.Lock()
+					if err := rf.setNodeNextIndex(nodeID, retryArgs.PrevLogIndex-1); err != nil {
+						lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err) // might due to it already become follower in another goroutine
+						rf.mu.Unlock()
+						return
+					}
+					retryArgs = rf.getAppendEntriesArgs(args.Term, nodeID)
+					rf.mu.Unlock()
+
+					reply = rf.sendAppendEntries(nodeID, retryArgs)
+				}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				// If successful: update nextIndex and matchIndex for follower
+				matchedIndex := args.PrevLogIndex + len(args.Logs)
+				if err := rf.setNodeMatchIndex(nodeID, matchedIndex); err != nil {
+					lablog.Debug(rf.me, lablog.Error, "set match index failed: %s", err)
+					return
+				}
+				if err := rf.setNodeNextIndex(nodeID, matchedIndex+1); err != nil {
+					lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+					return
+				}
+				rf.commit(nodeID, args.Term)
+			}(nodeID)
+		}
+	}
+}
+
+// commit update the commitIndex state after checking the majority of matchIndex
+func (rf *Raft) commit(nodeID int, term int32) {
+	// If there exists an N such that N > commitIndex, a majority
+	// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+	// set commitIndex = N (§5.3, §5.4).
+	N := rf.matchIndex[nodeID]
+	lablog.Debug(rf.me, lablog.Commit, "checking commit node %d at term %d: N=%d", nodeID, term, N)
+	count := 1 // 1 for leader itself
+	if N > rf.commitIndex {
+		for i := range rf.peers {
+			if rf.matchIndex[i] >= N {
+				count++
+			}
+		}
+		if count >= rf.majority() && rf.Log[N].Term == term {
+			lablog.Debug(rf.me, lablog.Commit, "commit index to index %d at term %d", N, term)
+			rf.setCommitIndex(N)
+			rf.applyMsgs(rf.applyCh)
 		}
 	}
 }
 
 // getAppendEntriesArgs returns the AppendEntriesArgs for the given term and nodeId
-func (rf *Raft) getAppendEntriesArgs(term int32) *AppendEntriesArgs {
+func (rf *Raft) getAppendEntriesArgs(term int32, nodeID int) *AppendEntriesArgs {
 	args := &AppendEntriesArgs{
-		Term:     term,
-		LeaderId: int32(rf.me),
+		Term:         term,
+		LeaderId:     int32(rf.me),
+		PrevLogIndex: 0,
+		Logs:         nil,
+		LeaderCommit: rf.commitIndex,
 	}
-
+	// If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
+	entries, prevEntry := rf.getNodeEntries(nodeID)
+	if prevEntry != nil {
+		args.PrevLogTerm = prevEntry.Term
+		args.PrevLogIndex = prevEntry.Index
+	}
+	if len(entries) > 0 {
+		args.Logs = make([]LogEntry, len(entries))
+		copy(args.Logs, entries)
+	} // else is heartbeat
 	return args
 }
 
@@ -472,6 +596,7 @@ func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) *AppendEn
 	ok := rf.peers[nodeId].Call("Raft.AppendEntries", args, reply)
 	if !ok {
 		lablog.Debug(rf.me, lablog.Error, "append entries to node %d at term %d was dropped", nodeId, args.Term)
+		// Servers retry RPCs if they do not receive a response in a timely manner, and they issue RPCs in parallel for best performance.
 		for !ok {
 			// beware of the retry could loop forever even after the term has been updated
 			rf.mu.Lock()
@@ -489,6 +614,12 @@ func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) *AppendEn
 type AppendEntriesArgs struct {
 	Term     int32
 	LeaderId int32
+	//index of log entry immediately preceding new ones, rf.getNextIndex(nodeId)-1
+	PrevLogIndex int
+	PrevLogTerm  int32
+	Logs         []LogEntry
+	// leader’s commitIndex
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -498,29 +629,68 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	currentTerm := rf.getCurrentTerm()
-	rf.mu.Unlock()
-	lablog.Debug(rf.me, lablog.Heart, "receive heartbeat from leader %d. %+v at currentTerm=%d", args.LeaderId, *args, currentTerm)
 	reply.Success = false
 	reply.Term = currentTerm
-
+	isHeartbeat := len(args.Logs) == 0
+	if isHeartbeat {
+		lablog.Debug(rf.me, lablog.Heart,
+			"received heartbeat from leader %d. %+v at currentTerm=%d",
+			args.LeaderId,
+			*args,
+			currentTerm,
+		)
+	} else {
+		lablog.Debug(
+			rf.me,
+			lablog.Info,
+			"received AppendEntries from leader %d. %+v at currentTerm=%d",
+			args.LeaderId,
+			*args,
+			currentTerm,
+		)
+	}
+	// Reply false if term < currentTerm (§5.1)
 	if args.Term < currentTerm {
 		return
 	}
 	// Current terms are exchanged whenever servers communicate;
 	// if one server’s currentterm is smaller than the other’s, then it updates its current term to the larger value.
 	rf.setCurrentTerm(args.Term)
-
-	if args.Term > currentTerm {
-		rf.mu.Lock()
-		rf.becomeFollower(args.Term)
-		rf.mu.Unlock()
-	}
-	reply.Success = true
-
 	// to reset election timeout
 	if rf.getState() == Follower {
 		rf.heartbeatCh <- true
+	}
+	// If a candidate or leader discovers that its term is out of date, it immediately reverts to follower state.
+	if args.Term > currentTerm || rf.getState() != Follower {
+		rf.becomeFollower(args.Term)
+	}
+	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.Log[len(rf.Log)-1].Index))
+		rf.applyMsgs(rf.applyCh)
+	}
+
+	// reply
+	if isHeartbeat {
+		reply.Success = true
+	} else {
+		reply.Success = false
+	}
+	reply.Term = currentTerm
+	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	if args.PrevLogIndex > len(rf.Log)-1 {
+		lablog.Debug(rf.me, lablog.Append, "not success 1 prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
+		reply.Success = false
+	} else if args.PrevLogIndex >= 0 && (len(rf.Log)-1 >= args.PrevLogIndex) && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.Log[args.PrevLogIndex].Term)
+		// If an existing entry conflicts with a new one (same index but different terms)
+		reply.Success = false
+	} else {
+		lablog.Debug(rf.me, lablog.Append, "append logs %+v", args.Logs)
+		rf.appendLogs(args.PrevLogIndex, args.Logs) // delete the existing entry and all that follow it and Append any new entries not already in the log
+		reply.Success = true
 	}
 }
 
@@ -543,6 +713,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		stepDownCh:    make(chan bool),
 		winElectionCh: make(chan bool),
 		heartbeatCh:   make(chan bool),
+		applyCh:       applyCh,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
