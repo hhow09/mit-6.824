@@ -19,12 +19,13 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/lablog"
 	"6.824/labrpc"
 	"6.824/labutil"
@@ -98,15 +99,17 @@ func (rf *Raft) GetState() (int, bool) {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
+// Persistent state on all servers: currentTerm, votedFor, log[]
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.getCurrentTerm())
+	e.Encode(rf.getVotedFor())
+	e.Encode(rf.Log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -116,17 +119,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currTerm int32
+	var votedFor int32
+	var logs []LogEntry
+
+	if d.Decode(&currTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		lablog.Debug(rf.me, lablog.Error, "readPersist failed")
+	} else {
+		rf.setCurrentTerm(currTerm)
+		rf.setVotedFor(votedFor)
+		rf.Log = logs
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -198,6 +205,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// persist votedFor to avoid voting twice within one term
 		rf.setVotedFor(args.CandidateId)
 	}
+	rf.persist()
 	rf.mu.Unlock()
 	// IMPORTANT: to reset election timeout
 	// otherwise, the follower will frequently timeout and start a new election
@@ -358,6 +366,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	appendedIndex := rf.appendLog(le)
 	lablog.Debug(rf.me, lablog.Start, "start agreement on command %+v at index %d", command, appendedIndex)
+	rf.persist()
 	return appendedIndex, int(term), isLeader
 }
 
@@ -692,11 +701,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.Log)-1 {
 		lablog.Debug(rf.me, lablog.Append, "not success 1 prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
 		reply.Success = false
+		rf.persist()
 		return
 	} else if args.PrevLogIndex >= 0 && (len(rf.Log)-1 >= args.PrevLogIndex) && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.Log[args.PrevLogIndex].Term)
 		// If an existing entry conflicts with a new one (same index but different terms)
 		reply.Success = false
+		rf.persist()
 		return
 	} else {
 		lablog.Debug(rf.me, lablog.Append, "append logs %+v", args.Logs)
@@ -709,6 +720,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.Log[len(rf.Log)-1].Index))
 		rf.applyMsgs(rf.applyCh)
 	}
+	rf.persist()
 }
 
 // the service or tester wants to create a Raft server. the ports
