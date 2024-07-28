@@ -505,14 +505,14 @@ func (rf *Raft) appendEntries() {
 				retryArgsCopied := *args
 				retryArgs := &retryArgsCopied
 				for !reply.Success {
-					if reply.Term > args.Term {
+					if reply.Term > retryArgs.Term {
 						rf.mu.Lock()
 						rf.becomeFollower(reply.Term)
 						rf.mu.Unlock()
 						return
 					}
 
-					lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", args.Term, nodeID)
+					lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", retryArgs.Term, nodeID)
 					// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
 					if retryArgs.PrevLogIndex <= 0 {
 						return
@@ -523,7 +523,7 @@ func (rf *Raft) appendEntries() {
 						rf.mu.Unlock()
 						return
 					}
-					retryArgs = rf.getAppendEntriesArgs(args.Term, nodeID)
+					retryArgs = rf.getAppendEntriesArgs(retryArgs.Term, nodeID)
 					rf.mu.Unlock()
 
 					reply = rf.sendAppendEntries(nodeID, retryArgs)
@@ -531,7 +531,7 @@ func (rf *Raft) appendEntries() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				// If successful: update nextIndex and matchIndex for follower
-				matchedIndex := args.PrevLogIndex + len(args.Logs)
+				matchedIndex := retryArgs.PrevLogIndex + len(retryArgs.Logs)
 				if err := rf.setNodeMatchIndex(nodeID, matchedIndex); err != nil {
 					lablog.Debug(rf.me, lablog.Error, "set match index failed: %s", err)
 					return
@@ -540,7 +540,7 @@ func (rf *Raft) appendEntries() {
 					lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
 					return
 				}
-				rf.commit(nodeID, args.Term)
+				rf.commit(nodeID, retryArgs.Term)
 			}(nodeID)
 		}
 	}
