@@ -16,7 +16,7 @@
 ## Lab2B Notes
 - `nextIndex` is "optmistic" records of peers' log index.
     - could decrease when peer reject the append log request.
-- `matchIndex` is "conservative" records of peers' log index.
+- `matchIndex` is "pessimistic" records of peers' log index.
     - in normal case, `matchIndex[i] + 1 = nextIndex[i]`
     - `commitIndex` should based on `matchIndex` (`(rf *Raft) commit(nodeID int, term int)`)
 
