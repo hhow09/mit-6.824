@@ -492,7 +492,12 @@ func (rf *Raft) appendEntries() {
 			lablog.Debug(rf.me, lablog.Append, "appendEntries to node %d, %+v", nodeID, *args)
 
 			go func(nodeID int) {
-				reply := rf.sendAppendEntries(nodeID, args)
+				reply, ok := rf.sendAppendEntries(nodeID, args)
+				if !ok {
+					// even if we don't handle, the next heartbeat will still retry
+					lablog.Debug(rf.me, lablog.Error, "send append entries to node %d failed", nodeID)
+					return
+				}
 				// If RPC request or response contains term T > currentTerm:
 				// set currentTerm = T, convert to follower (§5.1)
 				if reply.Term > args.Term {
@@ -524,9 +529,17 @@ func (rf *Raft) appendEntries() {
 						return
 					}
 					retryArgs = rf.getAppendEntriesArgs(retryArgs.Term, nodeID)
+					if !rf.shouldSendAppendEntries(retryArgs) {
+						rf.mu.Unlock()
+						return
+					}
 					rf.mu.Unlock()
-
-					reply = rf.sendAppendEntries(nodeID, retryArgs)
+					reply, ok = rf.sendAppendEntries(nodeID, retryArgs)
+					if !ok {
+						// even if we don't handle, the next heartbeat will still retry
+						lablog.Debug(rf.me, lablog.Error, "send append entries to node %d failed", nodeID)
+						return
+					}
 				}
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
@@ -594,25 +607,15 @@ func (rf *Raft) getAppendEntriesArgs(term int32, nodeID int) *AppendEntriesArgs 
 	return args
 }
 
-func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) *AppendEntriesReply {
+func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) (*AppendEntriesReply, bool) {
 	lablog.Debug(rf.me, lablog.Heart, "send append entries to node %d", nodeId)
 	reply := &AppendEntriesReply{}
 	ok := rf.peers[nodeId].Call("Raft.AppendEntries", args, reply)
-	if !ok {
-		lablog.Debug(rf.me, lablog.Error, "append entries to node %d at term %d was dropped", nodeId, args.Term)
-		// Servers retry RPCs if they do not receive a response in a timely manner, and they issue RPCs in parallel for best performance.
-		for !ok {
-			// beware of the retry could loop forever even after the term has been updated
-			rf.mu.Lock()
-			shouldSend := !rf.killed() && rf.getState() == Leader && rf.getCurrentTerm() == args.Term
-			rf.mu.Unlock()
-			if !shouldSend {
-				return reply
-			}
-			ok = rf.peers[nodeId].Call("Raft.AppendEntries", args, reply)
-		}
-	}
-	return reply
+	return reply, ok
+}
+
+func (rf *Raft) shouldSendAppendEntries(args *AppendEntriesArgs) bool {
+	return !rf.killed() && rf.getState() == Leader && rf.getCurrentTerm() == args.Term
 }
 
 type AppendEntriesArgs struct {
