@@ -560,6 +560,10 @@ func (rf *Raft) commit(nodeID int, term int32) {
 				count++
 			}
 		}
+		// Why rf.Log[N].Term == term ?
+		// To eliminate problems like the one in Figure 8,
+		// Raft never commits log entries from previous terms by counting replicas.
+		// Only log entries from the leader’s current term are committed by counting replicas; ($5.4.2)
 		if count >= rf.majority() && rf.Log[N].Term == term {
 			lablog.Debug(rf.me, lablog.Commit, "commit index to index %d at term %d", N, term)
 			rf.setCommitIndex(N)
