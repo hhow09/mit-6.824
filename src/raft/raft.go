@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -379,9 +380,7 @@ func (rf *Raft) ticker() {
 			case <-rf.stepDownCh:
 				// cancel the operation when it becomes follower
 			case <-time.After(leaderHeartbeatIntervalMs * time.Millisecond):
-				rf.mu.Lock()
 				rf.appendEntries()
-				rf.mu.Unlock()
 			}
 		case Follower:
 			select {
@@ -488,10 +487,16 @@ func (rf *Raft) becomeLeader() {
 func (rf *Raft) appendEntries() {
 	for nodeID := range rf.peers {
 		if nodeID != rf.me {
-			args := rf.getAppendEntriesArgs(rf.getCurrentTerm(), nodeID)
-			lablog.Debug(rf.me, lablog.Append, "appendEntries to node %d, %+v", nodeID, *args)
-
 			go func(nodeID int) {
+				rf.mu.Lock()
+				args, err := rf.getAppendEntriesArgs(rf.getCurrentTerm(), nodeID)
+				if err != nil {
+					lablog.Debug(rf.me, lablog.Error, "get append entries args failed: %s", err)
+					rf.mu.Unlock()
+					return
+				}
+				lablog.Debug(rf.me, lablog.Append, "appendEntries to node %d, %+v", nodeID, *args)
+				rf.mu.Unlock()
 				reply, ok := rf.sendAppendEntries(nodeID, args)
 				if !ok {
 					// even if we don't handle, the next heartbeat will still retry
@@ -528,8 +533,9 @@ func (rf *Raft) appendEntries() {
 						rf.mu.Unlock()
 						return
 					}
-					retryArgs = rf.getAppendEntriesArgs(retryArgs.Term, nodeID)
-					if !rf.shouldSendAppendEntries(retryArgs) {
+					retryArgs, err = rf.getAppendEntriesArgs(retryArgs.Term, nodeID)
+					if err != nil {
+						lablog.Debug(rf.me, lablog.Error, "get append entries args failed: %s", err)
 						rf.mu.Unlock()
 						return
 					}
@@ -586,7 +592,7 @@ func (rf *Raft) commit(nodeID int, term int32) {
 }
 
 // getAppendEntriesArgs returns the AppendEntriesArgs for the given term and nodeId
-func (rf *Raft) getAppendEntriesArgs(term int32, nodeID int) *AppendEntriesArgs {
+func (rf *Raft) getAppendEntriesArgs(term int32, nodeID int) (*AppendEntriesArgs, error) {
 	args := &AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     int32(rf.me),
@@ -595,7 +601,10 @@ func (rf *Raft) getAppendEntriesArgs(term int32, nodeID int) *AppendEntriesArgs 
 		LeaderCommit: rf.commitIndex,
 	}
 	// If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
-	entries, prevEntry := rf.getNodeEntries(nodeID)
+	entries, prevEntry, err := rf.getNodeEntries(nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("get node entries failed: %s", err)
+	}
 	if prevEntry != nil {
 		args.PrevLogTerm = prevEntry.Term
 		args.PrevLogIndex = prevEntry.Index
@@ -604,7 +613,7 @@ func (rf *Raft) getAppendEntriesArgs(term int32, nodeID int) *AppendEntriesArgs 
 		args.Logs = make([]LogEntry, len(entries))
 		copy(args.Logs, entries)
 	} // else is heartbeat
-	return args
+	return args, nil
 }
 
 func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) (*AppendEntriesReply, bool) {
@@ -612,10 +621,6 @@ func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) (*AppendE
 	reply := &AppendEntriesReply{}
 	ok := rf.peers[nodeId].Call("Raft.AppendEntries", args, reply)
 	return reply, ok
-}
-
-func (rf *Raft) shouldSendAppendEntries(args *AppendEntriesArgs) bool {
-	return !rf.killed() && rf.getState() == Leader && rf.getCurrentTerm() == args.Term
 }
 
 type AppendEntriesArgs struct {

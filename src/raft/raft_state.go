@@ -168,18 +168,21 @@ func (rf *raftState) applyMsgs(applyCh chan ApplyMsg) {
 	}
 }
 
-func (rf *raftState) getNodeEntries(nodeID int) ([]LogEntry, *LogEntry) {
+func (rf *raftState) getNodeEntries(nodeID int) ([]LogEntry, *LogEntry, error) {
+	if len(rf.nextIndex) == 0 {
+		return nil, nil, errors.New("empty nextIndex, the node is not a leader")
+	}
 	nextIdx := rf.nextIndex[nodeID]
 	if nextIdx >= len(rf.Log) {
 		if nextIdx == len(rf.Log) && len(rf.Log) > 0 {
-			return nil, &rf.Log[len(rf.Log)-1]
+			return nil, &rf.Log[len(rf.Log)-1], nil
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	if nextIdx > 0 {
-		return rf.Log[nextIdx:], &rf.Log[nextIdx-1]
+		return rf.Log[nextIdx:], &rf.Log[nextIdx-1], nil
 	}
-	return rf.Log[nextIdx:], nil
+	return rf.Log[nextIdx:], nil, nil
 }
 
 // dead
