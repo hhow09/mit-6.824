@@ -34,6 +34,8 @@ const (
 	Leader LogTopic = "LEAD"
 	Append LogTopic = "APND"
 	Error  LogTopic = "ERRO"
+	Start  LogTopic = "STRT"
+	Commit LogTopic = "COMT"
 )
 
 var debugStart time.Time
