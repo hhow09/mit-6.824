@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	//	"bytes"
 	"bytes"
 	"fmt"
 	"sync"
@@ -530,13 +529,41 @@ func (rf *Raft) appendEntries() {
 					if args.PrevLogIndex <= 0 {
 						return
 					}
-					// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
-					// PrevLogIndex = nextIndex - 1
-					// the ENSURED consistent log index is dummy entry at index 0
-					if err := rf.setNodeNextIndex(nodeID, args.PrevLogIndex); err != nil {
-						lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err) // might due to it already become follower in another goroutine
-						rf.mu.Unlock()
-						return
+
+					// optimizations for retry logic
+					if reply.XTerm != -1 { // follower has the term
+						conflictTermIndex := -1
+						// #1 Upon receiving a conflict response, the leader should first search its log for conflictTerm.
+						// #2 If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
+						// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
+						// #1
+						for index := args.PrevLogIndex - 1; index >= 0; index-- {
+							if rf.Log[index].Term == reply.XTerm {
+								conflictTermIndex = index
+								break
+							}
+						}
+						if conflictTermIndex != -1 {
+							// #2
+							lablog.Debug(rf.me, lablog.Append, "try to sync from the term conflict term index=%d", conflictTermIndex)
+							if err := rf.setNodeNextIndex(nodeID, conflictTermIndex+1); err != nil { // 2
+								lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+								return
+							}
+						} else {
+							// follower does not contains the term
+							lablog.Debug(rf.me, lablog.Append, "try to sync with XIndex=%d", reply.XIndex)
+							if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
+								lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+								return
+							}
+						}
+					} else {
+						if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
+							// error might due to it already become follower in another goroutine
+							lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+							return
+						}
 					}
 					return
 				}
@@ -628,6 +655,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Success bool
 	Term    int32
+	XTerm   int32 //  term in the conflicting entry (if any)
+	XIndex  int   // the first index it stores for the conflicting term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -676,17 +705,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		reply.Success = false
 	}
-	reply.Term = currentTerm
+	reply.XTerm, reply.XIndex = -1, -1
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex > len(rf.Log)-1 {
-		lablog.Debug(rf.me, lablog.Append, "not success 1 prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
+		// If a follower does not have prevLogIndex in its log,
+		// it should return with conflictIndex = len(log) and conflictTerm = None.
+		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
+		lablog.Debug(rf.me, lablog.Append, "not success: log too short,  prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
 		reply.Success = false
+		reply.XIndex = len(rf.Log)
 		rf.persist()
 		return
-	} else if args.PrevLogIndex >= 0 && (len(rf.Log)-1 >= args.PrevLogIndex) && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	} else if args.PrevLogIndex >= 0 && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.Log[args.PrevLogIndex].Term)
 		// If an existing entry conflicts with a new one (same index but different terms)
 		reply.Success = false
+		// If a follower does have prevLogIndex in its log, but the term does not match,
+		// it should return conflictTerm = log[prevLogIndex].Term, and then search its log for the first index whose entry has term equal to conflictTerm.
+		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
+		conflictingTerm := rf.Log[args.PrevLogIndex].Term
+		reply.XTerm = conflictingTerm
+		for i := 1; i <= args.PrevLogIndex; i++ {
+			if rf.Log[i].Term == conflictingTerm {
+				reply.XIndex = i
+				break
+			}
+		}
 		rf.persist()
 		return
 	} else {

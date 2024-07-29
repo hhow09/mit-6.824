@@ -61,4 +61,6 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
 - Uncommited logs `{102, 1},{103, 1},{104, 1}` in A are removed.
 
 ## Lab 2C Notes
-- Update to stable storage before responding to RPCs: `Start()`, `AppendEntries()`, `RequestVote()` (Figure 2)
+- `persist()` before responding to RPCs: `Start()`, `AppendEntries()`, `RequestVote()` (Figure 2)
+- if RPC fails, simply let it retry at netxt heartbeat, no need to write retry logic.
+- For debug, print out the logs, request reply to fix the boundary condition
