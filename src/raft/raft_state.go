@@ -173,16 +173,13 @@ func (rf *raftState) getNodeEntries(nodeID int) ([]LogEntry, *LogEntry, error) {
 		return nil, nil, errors.New("empty nextIndex, the node is not a leader")
 	}
 	nextIdx := rf.nextIndex[nodeID]
-	if nextIdx >= len(rf.Log) {
-		if nextIdx == len(rf.Log) && len(rf.Log) > 0 {
-			return nil, &rf.Log[len(rf.Log)-1], nil
-		}
+	if nextIdx > len(rf.Log) {
 		return nil, nil, nil
 	}
-	if nextIdx > 0 {
-		return rf.Log[nextIdx:], &rf.Log[nextIdx-1], nil
+	if nextIdx == len(rf.Log) {
+		return nil, &rf.Log[len(rf.Log)-1], nil
 	}
-	return rf.Log[nextIdx:], nil, nil
+	return rf.Log[nextIdx:], &rf.Log[nextIdx-1], nil
 }
 
 // dead
