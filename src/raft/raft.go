@@ -523,12 +523,14 @@ func (rf *Raft) appendEntries() {
 					}
 
 					lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", retryArgs.Term, nodeID)
-					// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
 					if retryArgs.PrevLogIndex <= 0 {
 						return
 					}
 					rf.mu.Lock()
-					if err := rf.setNodeNextIndex(nodeID, retryArgs.PrevLogIndex-1); err != nil {
+					// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
+					// PrevLogIndex = nextIndex - 1
+					// the ENSURED consistent log index is dummy entry at index 0
+					if err := rf.setNodeNextIndex(nodeID, retryArgs.PrevLogIndex); err != nil {
 						lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err) // might due to it already become follower in another goroutine
 						rf.mu.Unlock()
 						return
