@@ -18,13 +18,13 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/lablog"
 	"6.824/labrpc"
 	"6.824/labutil"
@@ -98,15 +98,17 @@ func (rf *Raft) GetState() (int, bool) {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
+// Persistent state on all servers: currentTerm, votedFor, log[]
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.getCurrentTerm())
+	e.Encode(rf.getVotedFor())
+	e.Encode(rf.Log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -116,17 +118,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currTerm int32
+	var votedFor int32
+	var logs []LogEntry
+
+	if d.Decode(&currTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		lablog.Debug(rf.me, lablog.Error, "readPersist failed")
+	} else {
+		rf.setCurrentTerm(currTerm)
+		rf.setVotedFor(votedFor)
+		rf.Log = logs
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -198,6 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// persist votedFor to avoid voting twice within one term
 		rf.setVotedFor(args.CandidateId)
 	}
+	rf.persist()
 	rf.mu.Unlock()
 	// IMPORTANT: to reset election timeout
 	// otherwise, the follower will frequently timeout and start a new election
@@ -358,6 +365,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	appendedIndex := rf.appendLog(le)
 	lablog.Debug(rf.me, lablog.Start, "start agreement on command %+v at index %d", command, appendedIndex)
+	rf.persist()
 	return appendedIndex, int(term), isLeader
 }
 
@@ -503,56 +511,64 @@ func (rf *Raft) appendEntries() {
 					lablog.Debug(rf.me, lablog.Error, "send append entries to node %d failed", nodeID)
 					return
 				}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				// If RPC request or response contains term T > currentTerm:
 				// set currentTerm = T, convert to follower (§5.1)
 				if reply.Term > args.Term {
-					rf.mu.Lock()
 					rf.becomeFollower(reply.Term)
-					rf.mu.Unlock()
 					return
 				}
 
-				retryArgsCopied := *args
-				retryArgs := &retryArgsCopied
-				for !reply.Success {
-					if reply.Term > retryArgs.Term {
-						rf.mu.Lock()
+				if !reply.Success {
+					if reply.Term > args.Term {
 						rf.becomeFollower(reply.Term)
-						rf.mu.Unlock()
+						return
+					}
+					lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", args.Term, nodeID)
+					if args.PrevLogIndex <= 0 {
 						return
 					}
 
-					lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", retryArgs.Term, nodeID)
-					if retryArgs.PrevLogIndex <= 0 {
-						return
+					// optimizations for retry logic
+					if reply.XTerm != -1 { // follower has the term
+						conflictTermIndex := -1
+						// #1 Upon receiving a conflict response, the leader should first search its log for conflictTerm.
+						// #2 If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
+						// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
+						// #1
+						for index := args.PrevLogIndex - 1; index >= 0; index-- {
+							if rf.Log[index].Term == reply.XTerm {
+								conflictTermIndex = index
+								break
+							}
+						}
+						if conflictTermIndex != -1 {
+							// #2
+							lablog.Debug(rf.me, lablog.Append, "try to sync from the term conflict term index=%d", conflictTermIndex)
+							if err := rf.setNodeNextIndex(nodeID, conflictTermIndex+1); err != nil { // 2
+								lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+								return
+							}
+						} else {
+							// follower does not contains the term
+							lablog.Debug(rf.me, lablog.Append, "try to sync with XIndex=%d", reply.XIndex)
+							if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
+								lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+								return
+							}
+						}
+					} else {
+						if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
+							// error might due to it already become follower in another goroutine
+							lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+							return
+						}
 					}
-					rf.mu.Lock()
-					// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
-					// PrevLogIndex = nextIndex - 1
-					// the ENSURED consistent log index is dummy entry at index 0
-					if err := rf.setNodeNextIndex(nodeID, retryArgs.PrevLogIndex); err != nil {
-						lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err) // might due to it already become follower in another goroutine
-						rf.mu.Unlock()
-						return
-					}
-					retryArgs, err = rf.getAppendEntriesArgs(retryArgs.Term, nodeID)
-					if err != nil {
-						lablog.Debug(rf.me, lablog.Error, "get append entries args failed: %s", err)
-						rf.mu.Unlock()
-						return
-					}
-					rf.mu.Unlock()
-					reply, ok = rf.sendAppendEntries(nodeID, retryArgs)
-					if !ok {
-						// even if we don't handle, the next heartbeat will still retry
-						lablog.Debug(rf.me, lablog.Error, "send append entries to node %d failed", nodeID)
-						return
-					}
+					return
 				}
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
 				// If successful: update nextIndex and matchIndex for follower
-				matchedIndex := retryArgs.PrevLogIndex + len(retryArgs.Logs)
+				matchedIndex := args.PrevLogIndex + len(args.Logs)
 				if err := rf.setNodeMatchIndex(nodeID, matchedIndex); err != nil {
 					lablog.Debug(rf.me, lablog.Error, "set match index failed: %s", err)
 					return
@@ -561,7 +577,7 @@ func (rf *Raft) appendEntries() {
 					lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
 					return
 				}
-				rf.commit(nodeID, retryArgs.Term)
+				rf.commit(nodeID, args.Term)
 			}(nodeID)
 		}
 	}
@@ -639,6 +655,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Success bool
 	Term    int32
+	XTerm   int32 //  term in the conflicting entry (if any)
+	XIndex  int   // the first index it stores for the conflicting term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -687,16 +705,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		reply.Success = false
 	}
-	reply.Term = currentTerm
+	reply.XTerm, reply.XIndex = -1, -1
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex > len(rf.Log)-1 {
-		lablog.Debug(rf.me, lablog.Append, "not success 1 prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
+		// If a follower does not have prevLogIndex in its log,
+		// it should return with conflictIndex = len(log) and conflictTerm = None.
+		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
+		lablog.Debug(rf.me, lablog.Append, "not success: log too short,  prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
 		reply.Success = false
+		reply.XIndex = len(rf.Log)
+		rf.persist()
 		return
-	} else if args.PrevLogIndex >= 0 && (len(rf.Log)-1 >= args.PrevLogIndex) && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	} else if args.PrevLogIndex >= 0 && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.Log[args.PrevLogIndex].Term)
 		// If an existing entry conflicts with a new one (same index but different terms)
 		reply.Success = false
+		// If a follower does have prevLogIndex in its log, but the term does not match,
+		// it should return conflictTerm = log[prevLogIndex].Term, and then search its log for the first index whose entry has term equal to conflictTerm.
+		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
+		conflictingTerm := rf.Log[args.PrevLogIndex].Term
+		reply.XTerm = conflictingTerm
+		for i := 1; i <= args.PrevLogIndex; i++ {
+			if rf.Log[i].Term == conflictingTerm {
+				reply.XIndex = i
+				break
+			}
+		}
+		rf.persist()
 		return
 	} else {
 		lablog.Debug(rf.me, lablog.Append, "append logs %+v", args.Logs)
@@ -709,6 +744,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.Log[len(rf.Log)-1].Index))
 		rf.applyMsgs(rf.applyCh)
 	}
+	rf.persist()
 }
 
 // the service or tester wants to create a Raft server. the ports
