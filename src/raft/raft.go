@@ -106,7 +106,7 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.getCurrentTerm())
 	e.Encode(rf.getVotedFor())
-	e.Encode(rf.Log)
+	e.Encode(rf.logs)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -131,7 +131,7 @@ func (rf *Raft) readPersist(data []byte) {
 	} else {
 		rf.setCurrentTerm(currTerm)
 		rf.setVotedFor(votedFor)
-		rf.Log = logs
+		rf.logs = logs
 	}
 }
 
@@ -196,7 +196,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	votedFor := rf.getVotedFor()
 	canVoteForThisCandidate := (votedFor == voteForNull || votedFor == args.CandidateId)
 	// prevents a candidate with an outdated log from becoming leader.
-	ismoreUpToDate := (len(rf.Log) == 0 || rf.isMoreUpToDate(args.LastLogTerm, args.LastLogIndex))
+	ismoreUpToDate := rf.isMoreUpToDate(args.LastLogTerm, args.LastLogIndex)
 	if canVoteForThisCandidate && ismoreUpToDate {
 		lablog.Debug(rf.me, lablog.Vote, "grant vote to candidate=%d at Term %d", args.CandidateId, args.Term)
 		reply.VoteGranted = true
@@ -484,8 +484,9 @@ func (rf *Raft) becomeLeader() {
 	rf.setState(Leader)
 	// initialized to leader last log index + 1
 	initNextIndex := make([]int, len(rf.peers))
+	defaultNextIdx := rf.lastLogIndex() + 1
 	for i := range initNextIndex {
-		initNextIndex[i] = len(rf.Log)
+		initNextIndex[i] = defaultNextIdx
 	}
 	rf.setNextIndex(initNextIndex)
 	rf.setMatchIndex(make([]int, len(rf.peers)))
@@ -538,7 +539,7 @@ func (rf *Raft) appendEntries() {
 						// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
 						// #1
 						for index := args.PrevLogIndex - 1; index >= 0; index-- {
-							if rf.Log[index].Term == reply.XTerm {
+							if rf.logEntry(index).Term == reply.XTerm {
 								conflictTermIndex = index
 								break
 							}
@@ -601,7 +602,7 @@ func (rf *Raft) commit(nodeID int, term int32) {
 		// To eliminate problems like the one in Figure 8,
 		// Raft never commits log entries from previous terms by counting replicas.
 		// Only log entries from the leader’s current term are committed by counting replicas; ($5.4.2)
-		if count >= rf.majority() && rf.Log[N].Term == term {
+		if count >= rf.majority() && rf.logEntry(N).Term == term {
 			lablog.Debug(rf.me, lablog.Commit, "commit index to index %d at term %d", N, term)
 			rf.setCommitIndex(N)
 			rf.applyMsgs(rf.applyCh)
@@ -707,26 +708,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.XTerm, reply.XIndex = -1, -1
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if args.PrevLogIndex > len(rf.Log)-1 {
+	if args.PrevLogIndex > rf.lastLogIndex() {
 		// If a follower does not have prevLogIndex in its log,
 		// it should return with conflictIndex = len(log) and conflictTerm = None.
 		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
-		lablog.Debug(rf.me, lablog.Append, "not success: log too short,  prevLogIndex=%d, but log length=%d", args.PrevLogIndex, len(rf.Log))
+		lablog.Debug(rf.me, lablog.Append, "not success: log too short, prevLogIndex=%d, but log last index=%d", args.PrevLogIndex, rf.lastLogIndex())
 		reply.Success = false
-		reply.XIndex = len(rf.Log)
+		reply.XIndex = rf.lastLogIndex() + 1
 		rf.persist()
 		return
-	} else if args.PrevLogIndex >= 0 && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.Log[args.PrevLogIndex].Term)
+	} else if args.PrevLogIndex >= 0 && rf.logEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
+		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.logEntry(args.PrevLogIndex).Term)
 		// If an existing entry conflicts with a new one (same index but different terms)
 		reply.Success = false
 		// If a follower does have prevLogIndex in its log, but the term does not match,
 		// it should return conflictTerm = log[prevLogIndex].Term, and then search its log for the first index whose entry has term equal to conflictTerm.
 		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
-		conflictingTerm := rf.Log[args.PrevLogIndex].Term
+		conflictingTerm := rf.logEntry(args.PrevLogIndex).Term
 		reply.XTerm = conflictingTerm
 		for i := 1; i <= args.PrevLogIndex; i++ {
-			if rf.Log[i].Term == conflictingTerm {
+			if rf.logEntry(i).Term == conflictingTerm {
 				reply.XIndex = i
 				break
 			}
@@ -741,7 +742,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// only when success
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
-		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.Log[len(rf.Log)-1].Index))
+		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.lastLogIndex()))
 		rf.applyMsgs(rf.applyCh)
 	}
 	rf.persist()

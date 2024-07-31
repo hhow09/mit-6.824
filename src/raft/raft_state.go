@@ -40,7 +40,7 @@ type raftState struct {
 	dead        int32 // set by Kill()
 
 	votedFor int32 // candidateId that received vote in current term (or null if none)
-	Log      []LogEntry
+	logs     []LogEntry
 	// index of highest log entry known to be committed (initialized to 0, increases monotonically)
 	commitIndex int
 
@@ -63,7 +63,8 @@ func newRaftState() raftState {
 		dead:        0,
 		votedFor:    voteForNull,
 		// keep a dummy entry
-		Log: []LogEntry{
+		// after 2D it serves as logical index offset.
+		logs: []LogEntry{
 			{Term: 0, Index: 0, Command: nil},
 		},
 		nextIndex:   nil, // nil for follower
@@ -98,11 +99,52 @@ func (r *raftState) setVotedFor(val int32) {
 	atomic.StoreInt32(&r.votedFor, val)
 }
 
+// dead
+func (r *raftState) killed() bool {
+	z := atomic.LoadInt32(&r.dead)
+	return z == 1
+}
+
+// the tester doesn't halt goroutines created by Raft after each test,
+// but it does call the Kill() method. your code can use killed() to
+// check whether Kill() has been called. the use of atomic avoids the
+// need for a lock.
+//
+// the issue is that long-running goroutines use memory and may chew
+// up CPU time, perhaps causing later tests to fail and generating
+// confusing debug output. any goroutine with a long-running loop
+// should call killed() to check whether it should stop.
+func (r *raftState) Kill() {
+	atomic.StoreInt32(&r.dead, 1)
+}
+
+// ^^^^ can access without lock ^^^^
+// vvvv need lock while access vvvv
+
 func (rf *raftState) lastLogTermAndIndex() (int32, int) {
-	if len(rf.Log) > 0 {
-		return rf.Log[len(rf.Log)-1].Term, len(rf.Log) - 1
+	lastLog := rf.logs[len(rf.logs)-1]
+	return lastLog.Term, rf.lastLogIndex()
+}
+
+func (rf *raftState) lastLogIndex() int {
+	return rf.logs[len(rf.logs)-1].Index
+}
+
+// return the log entry at the given index
+func (rf *raftState) logEntry(index int) *LogEntry {
+	base := rf.baseIndex()
+	if index < base || index > rf.lastLogIndex() {
+		return nil
 	}
-	return 0, -1
+	return &rf.logs[index-base]
+}
+
+func (rf *raftState) logsFrom(idx int) []LogEntry {
+	base := rf.baseIndex()
+	if idx < base {
+		return nil
+	}
+	return rf.logs[idx-base:]
 }
 
 func (rf *raftState) setNextIndex(nextIdx []int) {
@@ -139,19 +181,23 @@ func (rf *raftState) setNodeMatchIndex(nodeID, matchIdx int) error {
 }
 
 // append the log entry to the log state and return the appended index
-func (r *raftState) appendLog(le LogEntry) (index int) {
-	le.Index = len(r.Log)
-	r.Log = append(r.Log, le)
-	return len(r.Log) - 1
+func (rf *raftState) appendLog(le LogEntry) (index int) {
+	le.Index = rf.lastLogIndex() + 1
+	rf.logs = append(rf.logs, le)
+	return le.Index
 }
 
-// append the log entry to the log state and return the appended index
+// append the log entries to the log state starting from the given index
 func (r *raftState) appendLogs(idx int, les []LogEntry) {
-	r.Log = append(r.Log[0:idx+1], les...)
+	r.logs = append(r.logs[0:idx+1], les...)
 }
 
 func (rf *raftState) setCommitIndex(i int) {
 	rf.commitIndex = i
+}
+
+func (rf *raftState) baseIndex() int {
+	return rf.logs[0].Index
 }
 
 // If commitIndex > lastApplied: increment lastApplied,
@@ -161,7 +207,7 @@ func (rf *raftState) applyMsgs(applyCh chan ApplyMsg) {
 		rf.lastApplied++
 		msg := ApplyMsg{
 			CommandValid: true,
-			Command:      rf.Log[rf.lastApplied].Command,
+			Command:      rf.logEntry(rf.lastApplied).Command,
 			CommandIndex: rf.lastApplied,
 		}
 		applyCh <- msg
@@ -173,30 +219,14 @@ func (rf *raftState) getNodeEntries(nodeID int) ([]LogEntry, *LogEntry, error) {
 		return nil, nil, errors.New("empty nextIndex, the node is not a leader")
 	}
 	nextIdx := rf.nextIndex[nodeID]
-	if nextIdx > len(rf.Log) {
+	switch {
+	case nextIdx <= 0:
+		return nil, nil, errors.New("invalid next index")
+	case nextIdx > rf.lastLogIndex()+1:
 		return nil, nil, nil
+	case nextIdx == rf.lastLogIndex()+1:
+		return nil, rf.logEntry(nextIdx - 1), nil
+	default: // 1 <= x <= lastLogIndex
+		return rf.logsFrom(nextIdx), rf.logEntry(nextIdx - 1), nil
 	}
-	if nextIdx == len(rf.Log) {
-		return nil, &rf.Log[len(rf.Log)-1], nil
-	}
-	return rf.Log[nextIdx:], &rf.Log[nextIdx-1], nil
-}
-
-// dead
-func (r *raftState) killed() bool {
-	z := atomic.LoadInt32(&r.dead)
-	return z == 1
-}
-
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-func (r *raftState) Kill() {
-	atomic.StoreInt32(&r.dead, 1)
 }
