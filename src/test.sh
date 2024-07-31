@@ -15,3 +15,8 @@ for i in $(seq 1 $TIMES); do
   echo "Running test 2C-$i"
   VERBOSE=1 go test ./raft/... -race -run 2C -count=1
 done
+
+for i in $(seq 1 $TIMES); do
+  echo "Running test 2C-$i"
+  VERBOSE=1 go test ./raft/... -race -run "(TestSnapshotBasic2D)" -count=1
+done

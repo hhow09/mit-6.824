@@ -86,6 +86,8 @@ type Raft struct {
 	winElectionCh chan bool
 	heartbeatCh   chan bool
 	applyCh       chan ApplyMsg
+
+	applyCond *sync.Cond // to wake up apply goroutine
 }
 
 // return currentTerm and whether this server
@@ -102,13 +104,16 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
+	rf.persister.SaveRaftState(rf.encodeState())
+}
+
+func (rf *Raft) encodeState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.getCurrentTerm())
 	e.Encode(rf.getVotedFor())
 	e.Encode(rf.logs)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	return w.Bytes()
 }
 
 // restore previously persisted state.
@@ -140,6 +145,7 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	lablog.Debug(rf.me, lablog.Snapshot, "cond install snapshot at term %d, index %d", lastIncludedTerm, lastIncludedIndex)
 
 	return true
 }
@@ -149,8 +155,59 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	lablog.Debug(rf.me, lablog.Snapshot, "snapshot at index %d", index)
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if index <= rf.baseIndex() {
+		lablog.Debug(rf.me, lablog.Snapshot, "snapshot index=%d is already compacted", index)
+		return
+	}
+	if index > rf.lastLogIndex() {
+		lablog.Debug(rf.me, lablog.Snapshot, "snapshot index=%d is out of range", index)
+		return
+	}
+	offsetTerm := rf.logEntry(index).Term
+	rf.trimLogs(index, offsetTerm)
+	rf.setBaseLog(index, offsetTerm)
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	lablog.Debug(rf.me, lablog.Snapshot, "snapshot index=%d saved and base index, term updated to %d, %d", index, rf.baseIndex(), offsetTerm)
+}
 
+// trimLogs trims the log entries from the given index and term.
+func (rf *Raft) trimLogs(index int, term int32) {
+	trimmed := make([]LogEntry, 0)
+	for i := rf.lastLogIndex(); i >= rf.baseIndex(); i-- {
+		entry := rf.logEntry(i)
+		if entry.Term == term && entry.Index == index {
+			trimmed = append(trimmed, rf.logsFrom(i)...)
+			rf.replaceLogs(trimmed)
+			return
+		}
+	}
+	panic("not found")
+}
+
+// TODO
+type InstallSnapshotArgs struct {
+}
+
+type InstallSnapshotReply struct {
+}
+
+// sendInstallSnapshot send a snapshot to a follower.
+// This happens when the leader has already discarded the next log entry that it needs to send to a follower.
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	// Usually the snapshot will contain new information not already in the recipient’s log.
+	// In this case, the follower discards its entire log ($7)
+
+	// If instead the follower receives a snapshot that describes a prefix of its log (due to retransmission or by mistake),
+	// then log entries covered by the snapshot are deleted but entries following the snapshot are still valid and must be retained. ($7)
 }
 
 // example RequestVote RPC arguments structure.
@@ -605,8 +662,42 @@ func (rf *Raft) commit(nodeID int, term int32) {
 		if count >= rf.majority() && rf.logEntry(N).Term == term {
 			lablog.Debug(rf.me, lablog.Commit, "commit index to index %d at term %d", N, term)
 			rf.setCommitIndex(N)
-			rf.applyMsgs(rf.applyCh)
+			rf.applyCond.Signal()
+			return
 		}
+	}
+}
+
+// If commitIndex > lastApplied: increment lastApplied,
+// apply log[lastApplied] to state machine (§5.3)
+func (rf *Raft) applyMsgs() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		for rf.getLastApplied() >= rf.commitIndex {
+			rf.applyCond.Wait() // will release lock
+		}
+		msgs := make([]ApplyMsg, 0)
+		newLastApplied := rf.getLastApplied()
+		for newLastApplied < rf.commitIndex {
+			newLastApplied += 1
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logEntry(newLastApplied).Command,
+				CommandIndex: newLastApplied,
+			}
+			msgs = append(msgs, msg)
+		}
+		rf.mu.Unlock()
+
+		// don't hold lock while sending to applyCh
+		// since applyCh make client app to call Snapshot which will lead to lock contention
+		for _, msg := range msgs {
+			rf.applyCh <- msg
+		}
+		rf.mu.Lock()
+		rf.setLastApplied(newLastApplied)
+		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), newLastApplied)
+		rf.mu.Unlock()
 	}
 }
 
@@ -743,7 +834,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.setCommitIndex(labutil.Min(args.LeaderCommit, rf.lastLogIndex()))
-		rf.applyMsgs(rf.applyCh)
+		rf.applyCond.Signal()
 	}
 	rf.persist()
 }
@@ -769,14 +860,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartbeatCh:   make(chan bool),
 		applyCh:       applyCh,
 	}
+	rf.applyCond = sync.NewCond(&rf.mu)
 
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.persister.ReadSnapshot()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
+	go rf.applyMsgs() // start applyMsgs goroutine
 	return rf
 }

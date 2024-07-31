@@ -147,6 +147,23 @@ func (rf *raftState) logsFrom(idx int) []LogEntry {
 	return rf.logs[idx-base:]
 }
 
+func (rf *raftState) replaceLogs(logs []LogEntry) {
+	rf.logs = logs
+}
+
+func (rf *raftState) setBaseLog(index int, term int32) {
+	rf.logs[0] = LogEntry{Index: index, Term: term, Command: nil}
+}
+
+func (rf *raftState) getLastApplied() int {
+	return rf.lastApplied
+}
+
+func (rf *raftState) setLastApplied(i int) int {
+	rf.lastApplied = i
+	return rf.lastApplied
+}
+
 func (rf *raftState) setNextIndex(nextIdx []int) {
 	rf.nextIndex = nextIdx
 }
@@ -189,7 +206,11 @@ func (rf *raftState) appendLog(le LogEntry) (index int) {
 
 // append the log entries to the log state starting from the given index
 func (r *raftState) appendLogs(idx int, les []LogEntry) {
-	r.logs = append(r.logs[0:idx+1], les...)
+	base := r.baseIndex()
+	if idx < base {
+		panic("invalid index")
+	}
+	r.logs = append(r.logs[0:(idx-base)+1], les...)
 }
 
 func (rf *raftState) setCommitIndex(i int) {
@@ -198,20 +219,6 @@ func (rf *raftState) setCommitIndex(i int) {
 
 func (rf *raftState) baseIndex() int {
 	return rf.logs[0].Index
-}
-
-// If commitIndex > lastApplied: increment lastApplied,
-// apply log[lastApplied] to state machine (§5.3)
-func (rf *raftState) applyMsgs(applyCh chan ApplyMsg) {
-	for rf.lastApplied < rf.commitIndex {
-		rf.lastApplied++
-		msg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.logEntry(rf.lastApplied).Command,
-			CommandIndex: rf.lastApplied,
-		}
-		applyCh <- msg
-	}
 }
 
 func (rf *raftState) getNodeEntries(nodeID int) ([]LogEntry, *LogEntry, error) {
@@ -225,7 +232,7 @@ func (rf *raftState) getNodeEntries(nodeID int) ([]LogEntry, *LogEntry, error) {
 	case nextIdx > rf.lastLogIndex()+1:
 		return nil, nil, nil
 	case nextIdx == rf.lastLogIndex()+1:
-		return nil, rf.logEntry(nextIdx - 1), nil
+		return nil, rf.logEntry(nextIdx - 1), nil //
 	default: // 1 <= x <= lastLogIndex
 		return rf.logsFrom(nextIdx), rf.logEntry(nextIdx - 1), nil
 	}
