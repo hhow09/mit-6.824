@@ -168,6 +168,10 @@ func (rf *raftState) setNextIndex(nextIdx []int) {
 	rf.nextIndex = nextIdx
 }
 
+func (rf *raftState) getNodeNextIndex(nodeID int) int {
+	return rf.nextIndex[nodeID]
+}
+
 func (rf *raftState) setNodeNextIndex(nodeID, nextIdx int) error {
 	if len(rf.nextIndex) == 0 {
 		return errors.New("empty nextIndex")

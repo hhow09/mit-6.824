@@ -143,10 +143,28 @@ func (rf *Raft) readPersist(data []byte) {
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
 	// Your code here (2D).
 	lablog.Debug(rf.me, lablog.Snapshot, "cond install snapshot at term %d, index %d", lastIncludedTerm, lastIncludedIndex)
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedIndex < rf.commitIndex {
+		lablog.Debug(rf.me, lablog.Snapshot, "snapshot too old, index=%d is already committed", lastIncludedIndex)
+		return false
+	}
+	if lastIncludedIndex > rf.baseIndex() {
+		// Usually the snapshot will contain new information not already in the recipient’s log.
+		// In this case, the follower discards its entire log ($7)
+		newLogs := make([]LogEntry, 1)
+		rf.replaceLogs(newLogs)
+		rf.setBaseLog(lastIncludedIndex, int32(lastIncludedTerm))
+	} else {
+		// If instead the follower receives a snapshot that describes a prefix of its log (due to retransmission or by mistake),
+		// then log entries covered by the snapshot are deleted but entries following the snapshot are still valid and must be retained. ($7)
+		rf.trimLogs(lastIncludedIndex, int32(lastIncludedTerm))
+	}
+	rf.setLastApplied(lastIncludedIndex)
+	rf.setCommitIndex(lastIncludedIndex)
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
 	return true
 }
 
@@ -186,28 +204,6 @@ func (rf *Raft) trimLogs(index int, term int32) {
 		}
 	}
 	panic("not found")
-}
-
-// TODO
-type InstallSnapshotArgs struct {
-}
-
-type InstallSnapshotReply struct {
-}
-
-// sendInstallSnapshot send a snapshot to a follower.
-// This happens when the leader has already discarded the next log entry that it needs to send to a follower.
-func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-	return ok
-}
-
-func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	// Usually the snapshot will contain new information not already in the recipient’s log.
-	// In this case, the follower discards its entire log ($7)
-
-	// If instead the follower receives a snapshot that describes a prefix of its log (due to retransmission or by mistake),
-	// then log entries covered by the snapshot are deleted but entries following the snapshot are still valid and must be retained. ($7)
 }
 
 // example RequestVote RPC arguments structure.
@@ -445,7 +441,7 @@ func (rf *Raft) ticker() {
 			case <-rf.stepDownCh:
 				// cancel the operation when it becomes follower
 			case <-time.After(leaderHeartbeatIntervalMs * time.Millisecond):
-				rf.appendEntries()
+				rf.replicates()
 			}
 		case Follower:
 			select {
@@ -550,95 +546,127 @@ func (rf *Raft) becomeLeader() {
 }
 
 // appendEntries sends AppendEntries RPCs to all peers
-func (rf *Raft) appendEntries() {
+func (rf *Raft) replicates() {
 	for nodeID := range rf.peers {
 		if nodeID != rf.me {
-			go func(nodeID int) {
-				rf.mu.Lock()
-				args, err := rf.getAppendEntriesArgs(rf.getCurrentTerm(), nodeID)
-				if err != nil {
-					lablog.Debug(rf.me, lablog.Error, "get append entries args failed: %s", err)
-					rf.mu.Unlock()
-					return
-				}
-				lablog.Debug(rf.me, lablog.Append, "appendEntries to node %d, %+v", nodeID, *args)
-				rf.mu.Unlock()
-				reply, ok := rf.sendAppendEntries(nodeID, args)
-				if !ok {
-					// even if we don't handle, the next heartbeat will still retry
-					lablog.Debug(rf.me, lablog.Error, "send append entries to node %d failed", nodeID)
-					return
-				}
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				// If RPC request or response contains term T > currentTerm:
-				// set currentTerm = T, convert to follower (§5.1)
-				if reply.Term > args.Term {
-					rf.becomeFollower(reply.Term)
-					return
-				}
+			go rf.replicaOneNode(nodeID)
+		}
+	}
+}
 
-				if !reply.Success {
-					if reply.Term > args.Term {
-						rf.becomeFollower(reply.Term)
-						return
-					}
-					lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", args.Term, nodeID)
-					if args.PrevLogIndex <= 0 {
-						return
-					}
+func (rf *Raft) replicaOneNode(nodeID int) {
+	rf.mu.Lock() // lock 1
+	if rf.getState() != Leader {
+		rf.mu.Unlock() // unlock 1
+		return
+	}
 
-					// optimizations for retry logic
-					if reply.XTerm != -1 { // follower has the term
-						conflictTermIndex := -1
-						// #1 Upon receiving a conflict response, the leader should first search its log for conflictTerm.
-						// #2 If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
-						// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
-						// #1
-						for index := args.PrevLogIndex - 1; index >= 0; index-- {
-							if rf.logEntry(index).Term == reply.XTerm {
-								conflictTermIndex = index
-								break
-							}
-						}
-						if conflictTermIndex != -1 {
-							// #2
-							lablog.Debug(rf.me, lablog.Append, "try to sync from the term conflict term index=%d", conflictTermIndex)
-							if err := rf.setNodeNextIndex(nodeID, conflictTermIndex+1); err != nil { // 2
-								lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
-								return
-							}
-						} else {
-							// follower does not contains the term
-							lablog.Debug(rf.me, lablog.Append, "try to sync with XIndex=%d", reply.XIndex)
-							if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
-								lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
-								return
-							}
-						}
-					} else {
-						if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
-							// error might due to it already become follower in another goroutine
-							lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
-							return
-						}
-					}
-					return
+	idx := rf.getNodeNextIndex(nodeID)
+	currTerm := rf.getCurrentTerm()
+
+	// send append entries or install snapshot
+	if idx > rf.baseIndex() {
+		// leader still has the log entries to send
+		args, err := rf.getAppendEntriesArgs(currTerm, nodeID)
+		rf.mu.Unlock()
+		if err != nil {
+			lablog.Debug(rf.me, lablog.Error, "get append entries args failed: %s", err)
+			return
+		}
+		rf.appendEntries(nodeID, args)
+	} else {
+		// some follower is too far behind such that the log entries is already compacted to snapshot
+		// install snapshot
+		args := rf.getInstallSnapshotArgs(currTerm)
+		rf.mu.Unlock()
+		rf.sendInstallSnapshot(nodeID, args)
+	}
+}
+
+func (rf *Raft) appendEntries(nodeID int, args *AppendEntriesArgs) {
+	rf.mu.Lock() // lock 1
+	if rf.getState() != Leader {
+		rf.mu.Unlock() // unlock 1
+		return
+	}
+	rf.mu.Unlock()
+	lablog.Debug(rf.me, lablog.Append, "append entries to node %d, %+v", nodeID, *args)
+	reply, ok := rf.sendAppendEntries(nodeID, args)
+	if !ok {
+		// even if we don't handle, the next heartbeat will still retry
+		lablog.Debug(rf.me, lablog.Error, "send append entries to node %d failed", nodeID)
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower (§5.1)
+	if reply.Term > args.Term {
+		rf.becomeFollower(reply.Term)
+		return
+	}
+	if !reply.Success {
+		if reply.Term > args.Term {
+			rf.becomeFollower(reply.Term)
+			rf.persist()
+			return
+		}
+		lablog.Debug(rf.me, lablog.Append, "term: %d, append entries to node %d failed, retry", args.Term, nodeID)
+		if args.PrevLogIndex <= 0 {
+			return
+		}
+
+		// optimizations for retry logic
+		if reply.XTerm != -1 { // follower has the term
+			conflictTermIndex := -1
+			// #1 Upon receiving a conflict response, the leader should first search its log for conflictTerm.
+			// #2 If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
+			// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
+			// #1
+			for index := args.PrevLogIndex - 1; index >= 0; index-- {
+				if rf.logEntry(index).Term == reply.XTerm {
+					conflictTermIndex = index
+					break
 				}
-				// If successful: update nextIndex and matchIndex for follower
-				matchedIndex := args.PrevLogIndex + len(args.Logs)
-				if err := rf.setNodeMatchIndex(nodeID, matchedIndex); err != nil {
-					lablog.Debug(rf.me, lablog.Error, "set match index failed: %s", err)
-					return
-				}
-				if err := rf.setNodeNextIndex(nodeID, matchedIndex+1); err != nil {
+			}
+			if conflictTermIndex != -1 {
+				// #2
+				lablog.Debug(rf.me, lablog.Append, "try to sync from the term conflict term index=%d", conflictTermIndex)
+				if err := rf.setNodeNextIndex(nodeID, conflictTermIndex+1); err != nil { // 2
 					lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
 					return
 				}
-				rf.commit(nodeID, args.Term)
-			}(nodeID)
+			} else {
+				// follower does not contains the term
+				lablog.Debug(rf.me, lablog.Append, "try to sync with XIndex=%d", reply.XIndex)
+				if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
+					lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+					return
+				}
+			}
+		} else {
+			if err := rf.setNodeNextIndex(nodeID, reply.XIndex); err != nil {
+				// error might due to it already become follower in another goroutine
+				lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+				return
+			}
 		}
+		return
 	}
+	lablog.Debug(rf.me, lablog.Append, "append entries to node RPC %d success", nodeID)
+	// If successful: update nextIndex and matchIndex for follower
+	matchedIndex := args.PrevLogIndex + len(args.Logs)
+	if err := rf.setNodeMatchIndex(nodeID, matchedIndex); err != nil {
+		lablog.Debug(rf.me, lablog.Error, "set match index failed: %s", err)
+		return
+	}
+	if err := rf.setNodeNextIndex(nodeID, matchedIndex+1); err != nil {
+		lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+		return
+	}
+	rf.commit(nodeID, args.Term)
+	lablog.Debug(rf.me, lablog.Append, "append entries to node %d success, matchIndex=%d, nextIndex=%d", nodeID, matchedIndex, rf.getNodeNextIndex(nodeID))
 }
 
 // commit update the commitIndex state after checking the majority of matchIndex
@@ -731,6 +759,45 @@ func (rf *Raft) sendAppendEntries(nodeId int, args *AppendEntriesArgs) (*AppendE
 	reply := &AppendEntriesReply{}
 	ok := rf.peers[nodeId].Call("Raft.AppendEntries", args, reply)
 	return reply, ok
+}
+
+func (rf *Raft) getInstallSnapshotArgs(term int32) *InstallSnapshotArgs {
+	base := rf.logEntry(rf.baseIndex())
+	args := &InstallSnapshotArgs{
+		Term:              term,
+		LeaderId:          int32(rf.me),
+		LastIncludedIndex: base.Index,
+		LastIncludedTerm:  base.Term,
+		Snapshot:          rf.persister.ReadSnapshot(),
+	}
+	return args
+}
+
+// This happens when the leader has already discarded the next log entry that it needs to send to a follower.
+func (rf *Raft) sendInstallSnapshot(nodeID int, args *InstallSnapshotArgs) {
+	reply := &InstallSnapshotReply{}
+	ok := rf.peers[nodeID].Call("Raft.InstallSnapshot", args, reply)
+	if !ok {
+		// even if we don't handle, the next heartbeat will still retry
+		lablog.Debug(rf.me, lablog.Error, "send install snapshot to node %d failed", nodeID)
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	if reply.Term > args.Term {
+		rf.becomeFollower(reply.Term)
+		return
+	}
+	// the follower already synced with leader's snapshot
+	if err := rf.setNodeMatchIndex(nodeID, args.LastIncludedIndex); err != nil {
+		lablog.Debug(rf.me, lablog.Error, "set match index failed: %s", err)
+		return
+	}
+	if err := rf.setNodeNextIndex(nodeID, args.LastIncludedIndex+1); err != nil {
+		lablog.Debug(rf.me, lablog.Error, "set next index failed: %s", err)
+		return
+	}
 }
 
 type AppendEntriesArgs struct {
@@ -837,6 +904,50 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.applyCond.Signal()
 	}
 	rf.persist()
+}
+
+type InstallSnapshotArgs struct {
+	Term     int32
+	LeaderId int32
+	// the last included entry index in the snapshot
+	LastIncludedIndex int
+	// the last included entry term in the snapshot
+	LastIncludedTerm int32
+	Snapshot         []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int32
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	lablog.Debug(rf.me, lablog.Snapshot, "received snapshot from leader %d at term %d. %+v ", args.LeaderId, rf.getCurrentTerm(), *args)
+	if args.Term < rf.getCurrentTerm() {
+		rf.mu.Unlock()
+		return
+	}
+	if args.Term > rf.getCurrentTerm() && rf.getState() != Follower {
+		rf.becomeFollower(args.Term)
+		rf.persist()
+	}
+
+	reply.Term = rf.getCurrentTerm()
+	rf.mu.Unlock()
+	// IMPORTANT: to reset election timeout
+	// otherwise, the follower will frequently timeout and start a new election
+	rf.heartbeatCh <- true
+
+	// asychronously apply the snapshot
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Snapshot,
+			SnapshotTerm:  int(args.LastIncludedTerm),
+			SnapshotIndex: args.LastIncludedIndex,
+		}
+	}()
+
 }
 
 // the service or tester wants to create a Raft server. the ports
