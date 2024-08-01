@@ -62,7 +62,10 @@ func newRaftState() raftState {
 		currentTerm: 0,
 		dead:        0,
 		votedFor:    voteForNull,
-		// keep a dummy entry
+		// The Leader Completeness Property guarantees that a leader has all committed entries,
+		// but at the start of its term, it may not know which those are.
+		// To find out, it needs to commit an entry from its term.
+		// Raft handles this by having each leader commit a blank no-op entry into the log at the start of its term. ($9)
 		// after 2D it serves as logical index offset.
 		logs: []LogEntry{
 			{Term: 0, Index: 0, Command: nil},
