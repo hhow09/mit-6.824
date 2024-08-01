@@ -18,5 +18,5 @@ done
 
 for i in $(seq 1 $TIMES); do
   echo "Running test 2D-$i"
-  VERBOSE=1 go test ./raft/... -race -run "(TestSnapshotBasic2D|TestSnapshotInstall2D)" -count=1
+  VERBOSE=1 go test ./raft/... -race -run 2D -count=1
 done

@@ -138,6 +138,12 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.setVotedFor(votedFor)
 		rf.logs = logs
 	}
+	// what happens on crash+restart?
+	// service reads snapshot from disk Raft reads persisted log from disk
+	// service tells Raft to set lastApplied to last included index
+	// to avoid re-applying already-applied log entries
+	// ref: http://nil.csail.mit.edu/6.824/2021/notes/l-raft2.txt
+	rf.lastApplied = rf.baseIndex()
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -977,7 +983,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	rf.persister.ReadSnapshot()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
