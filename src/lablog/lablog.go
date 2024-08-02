@@ -26,16 +26,17 @@ func getVerbosity() int {
 type LogTopic string
 
 const (
-	Heart  LogTopic = "HART"
-	Info   LogTopic = "INFO"
-	Config LogTopic = "CONF"
-	Vote   LogTopic = "VOTE"
-	Timer  LogTopic = "TIMR"
-	Leader LogTopic = "LEAD"
-	Append LogTopic = "APND"
-	Error  LogTopic = "ERRO"
-	Start  LogTopic = "STRT"
-	Commit LogTopic = "COMT"
+	Heart    LogTopic = "HART"
+	Info     LogTopic = "INFO"
+	Config   LogTopic = "CONF"
+	Vote     LogTopic = "VOTE"
+	Timer    LogTopic = "TIMR"
+	Leader   LogTopic = "LEAD"
+	Append   LogTopic = "APND"
+	Error    LogTopic = "ERRO"
+	Start    LogTopic = "STRT"
+	Commit   LogTopic = "COMT"
+	Snapshot LogTopic = "SNAP"
 )
 
 var debugStart time.Time

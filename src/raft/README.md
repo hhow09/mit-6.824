@@ -68,3 +68,17 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
     - lock -> read state -> prepare request arguments -> unlock 
     - send request
     - lock -> read result -> update state -> unlock
+
+## Lab 2D Notes
+### Flows
+#### Snapshot
+1. Application calls `Snapshot` to raft node.
+    - ref: `applierSnap` of [config.go](./config.go)
+2. Raft `Snapshot`
+
+#### Sync Snapshot
+3. Leader send `InstallSnapshot` RPC to follower
+4. Follower received `InstallSnapshot` RPC from leader
+    - follower checks the snapshot freshness
+    - if ok, send `ApplyMsg` to application through channel.
+5. Application received `ApplyMsg` and calls `CondInstallSnapshot` to install snapshot.
