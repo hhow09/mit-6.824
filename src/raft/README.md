@@ -1,11 +1,25 @@
-# Raft Lab 
-## Test
+# Raft Lab
+- Link: http://nil.csail.mit.edu/6.824/2021/labs/lab-raft.html
+- Paper: http://nil.csail.mit.edu/6.824/2021/papers/raft-extended.pdf
+
+## Run Test
 ```
 ./test.sh
 ```
 - test 10 times to ensure consistently corret.
 
-## Lab2A Notes
+## 2A: leader election
+- Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/1
+
+### Overview
+- implement raft state machine
+- implement leader election
+    - follower timeout
+    - candidate request vote and collect vote
+    - candidate becomes leader
+    - leader heartbeat
+
+### Notes
 - `GetState()` need to be accessed by config, therefore `state`, `currentTerm` are accessed with atomic to avoid using lock.
 - we should keep **election timeout** randomnize in certain range to avoid split vote.
 - always check the state before communicate with peers (request vote, respond, heartbeat...)
@@ -13,7 +27,19 @@
     - if node's own term is outdated, become follower
 - `sendAppendEntries` with 0 log entry ==> means heartbeat 
 
-## Lab2B Notes
+## 2B: log
+- Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/2
+
+### Overview
+- implement leader replicating logs to 
+    - update `matchIndex` and `nextIndex` when request success
+- implement logs consistency check when follower receives `AppendEntries`
+- implement committing logs (tracking with `matchIndex`)
+- implement applying messages to state machine when logs are considered committed
+- implement the election restriction
+- implement Leader Completeness Property
+
+### Notes
 - `nextIndex` is "optmistic" records of peers' log index.
     - could decrease when peer reject the append log request.
 - `matchIndex` is "pessimistic" records of peers' log index.
@@ -60,8 +86,15 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
 ```
 - Uncommited logs `{102, 1},{103, 1},{104, 1}` in A are removed.
 
-## Lab 2C Notes
-- `persist()` before responding to RPCs: `Start()`, `AppendEntries()`, `RequestVote()` (Figure 2)
+## 2C: persistence
+- Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/5
+
+### Overview
+- implement state encoding and persistence based on the `Persistent state` in paper Fig. 2.
+- implement optimization of conflicting entry retry in at the bottom of paper page 7
+
+### Notes
+- `persist()` before responding to RPCs: `Start()`, `AppendEntries()`, `RequestVote()` (Fig. 2)
 - if RPC fails, simply let it retry at netxt heartbeat, no need to write retry logic.
 - For debug, print out the logs, request reply to fix the boundary condition
 - The lock strategy here is:
@@ -69,7 +102,14 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
     - send request
     - lock -> read result -> update state -> unlock
 
-## Lab 2D Notes
+## 2D: log compaction
+- Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/5
+
+### Overview
+- implement snapshot 
+- implement sending snapshot to follower
+- implement log trimming when follower receiving snapshot.
+
 ### Flows
 #### Snapshot
 1. Application calls `Snapshot` to raft node.
