@@ -1,12 +1,22 @@
 package kvraft
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK           = "OK"
+	ErrNoKey     = "ErrNoKey"
+	ErrNotLeader = "NOT_LEADER"
+	ErrTimeout   = "TIMEOUT"
 )
 
 type Err string
+
+func isRetriableError(err Err) bool {
+	return (err == ErrNotLeader || err == ErrTimeout)
+}
+
+type ArgsCommon struct {
+	ClientId  int64
+	RequestID int64
+}
 
 // Put or Append
 type PutAppendArgs struct {
@@ -16,6 +26,7 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ArgsCommon
 }
 
 type PutAppendReply struct {
@@ -25,6 +36,7 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ArgsCommon
 }
 
 type GetReply struct {
