@@ -136,7 +136,7 @@ func (rf *raftState) lastLogIndex() int {
 // return the log entry at the given index
 func (rf *raftState) logEntry(index int) *LogEntry {
 	base := rf.baseIndex()
-	if index < base || index > rf.lastLogIndex() {
+	if index < base || index-base >= len(rf.logs) {
 		return nil
 	}
 	return &rf.logs[index-base]
@@ -148,6 +148,18 @@ func (rf *raftState) logsFrom(idx int) []LogEntry {
 		return nil
 	}
 	return rf.logs[idx-base:]
+}
+
+// return the log entries from start to end index (inclusive)
+func (rf *raftState) logsRange(start, end int) []LogEntry {
+	if start > end {
+		return nil
+	}
+	base := rf.baseIndex()
+	if start < base || end < base || start-base >= len(rf.logs) || end-base >= len(rf.logs) {
+		return nil
+	}
+	return rf.logs[start-base : end-base+1]
 }
 
 func (rf *raftState) replaceLogs(logs []LogEntry) {
