@@ -24,5 +24,5 @@ done
 # kvraft
 for i in $(seq 1 $TIMES); do
   echo "Running test 3A-$i"
-  go test ./kvraft/... -race -run="(TestBasic3A)" -count=1
+  VERBOSE=1 go test ./kvraft/... -race -run="(TestBasic3A|TestSpeed3A|TestConcurrent3A)" -count=1
 done
