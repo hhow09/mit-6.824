@@ -105,17 +105,11 @@ func (kv *KVServer) handleOp(op Op) reply {
 	if !isLeader {
 		return reply{err: ErrNotLeader}
 	}
-	// remove used channels
-	defer func() {
-		kv.mu.Lock()
-		kv.removeResChan(idx)
-		kv.mu.Unlock()
-	}()
 	kv.mu.Lock()
 	kv.setCurrTerm(currTerm)
-	kv.addResChan(idx)
-	resChan := kv.getResChan(idx)
+	resChan, remove := kv.addResChan(idx)
 	kv.mu.Unlock()
+	defer remove()
 	select {
 	case res := <-resChan:
 		return res
@@ -233,17 +227,19 @@ func (kv *KVServer) getCurrTerm() int {
 	return int(atomic.LoadUint32(&kv.currTerm))
 }
 
-func (kv *KVServer) addResChan(idx int) {
+func (kv *KVServer) addResChan(idx int) (chan reply, func()) {
 	kv.resChan[idx] = make(chan reply, 1)
+	remove := func() {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		close(kv.resChan[idx])
+		delete(kv.resChan, idx)
+	}
+	return kv.resChan[idx], remove
 }
 
 func (kv *KVServer) getResChan(idx int) chan reply {
 	return kv.resChan[idx]
-}
-
-func (kv *KVServer) removeResChan(idx int) {
-	close(kv.resChan[idx])
-	delete(kv.resChan, idx)
 }
 
 // alreadyRepliedRecord checks if the server has already replied to the client

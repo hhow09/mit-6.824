@@ -410,11 +410,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
-	index := -1
-
 	isLeader := rf.getState() == Leader
 	if !isLeader || rf.killed() {
-		return index, 0, isLeader
+		return -1, 0, false
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
