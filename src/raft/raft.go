@@ -54,6 +54,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int32 // for state machine to check whether the command is outdated
 
 	// For 2D:
 	SnapshotValid bool
@@ -409,14 +410,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	index := -1
-
 	isLeader := rf.getState() == Leader
 	if !isLeader || rf.killed() {
-		return index, 0, isLeader
+		return -1, 0, false
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	term := rf.getCurrentTerm()
 	le := LogEntry{
 		Term:    term,
@@ -425,6 +424,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	appendedIndex := rf.appendLog(le)
 	lablog.Debug(rf.me, lablog.Start, "start agreement on command %+v at index %d", command, appendedIndex)
 	rf.persist()
+
+	// (3A) immediately replicate() for increasing throughput since TestSpeed3A requires 3 ops per heartbeat
+	// before: it was too slow on client side since client blocks next operation until it is committed => 1 operation per heartbeat
+	rf.replicates()
 	return appendedIndex, int(term), isLeader
 }
 
@@ -437,10 +440,8 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		rf.mu.Lock()
 		state := rf.getState()
 		lablog.Debug(rf.me, lablog.Timer, "ticker: current state: %s, term: %d", state, rf.getCurrentTerm())
-		rf.mu.Unlock()
 		switch state {
 		case Leader:
 			select {
@@ -481,11 +482,11 @@ func (rf *Raft) ticker() {
 			case <-rf.stepDownCh:
 				// cancel the operation when becomes follower
 			case <-rf.winElectionCh:
-				rf.mu.Lock()
 				if rf.getState() == Candidate {
+					rf.mu.Lock()
 					rf.becomeLeader()
+					rf.mu.Unlock()
 				}
-				rf.mu.Unlock()
 			}
 		}
 	}
@@ -561,12 +562,13 @@ func (rf *Raft) replicates() {
 }
 
 func (rf *Raft) replicaOneNode(nodeID int) {
-	rf.mu.Lock() // lock 1
 	if rf.getState() != Leader {
-		rf.mu.Unlock() // unlock 1
 		return
 	}
-
+	// no need to accumulate goroutine since replicates() might got called many times
+	if !rf.mu.TryLock() {
+		return
+	}
 	idx := rf.getNodeNextIndex(nodeID)
 	currTerm := rf.getCurrentTerm()
 
@@ -591,7 +593,7 @@ func (rf *Raft) replicaOneNode(nodeID int) {
 
 func (rf *Raft) appendEntries(nodeID int, args *AppendEntriesArgs) {
 	rf.mu.Lock() // lock 1
-	if rf.getState() != Leader {
+	if rf.getState() != Leader || rf.getCurrentTerm() != args.Term {
 		rf.mu.Unlock() // unlock 1
 		return
 	}
@@ -710,14 +712,14 @@ func (rf *Raft) applyMsgs() {
 		for rf.getLastApplied() >= rf.commitIndex {
 			rf.applyCond.Wait() // will release lock
 		}
-		msgs := make([]ApplyMsg, 0)
-		newLastApplied := rf.getLastApplied()
-		for newLastApplied < rf.commitIndex {
-			newLastApplied += 1
+		lastApplied, commitIdx := rf.getLastApplied(), rf.commitIndex
+		msgs := make([]ApplyMsg, 0, commitIdx-lastApplied)
+		for _, entry := range rf.logsRange(lastApplied+1, commitIdx) {
 			msg := ApplyMsg{
 				CommandValid: true,
-				Command:      rf.logEntry(newLastApplied).Command,
-				CommandIndex: newLastApplied,
+				Command:      entry.Command,
+				CommandIndex: entry.Index,
+				CommandTerm:  entry.Term,
 			}
 			msgs = append(msgs, msg)
 		}
@@ -729,8 +731,8 @@ func (rf *Raft) applyMsgs() {
 			rf.applyCh <- msg
 		}
 		rf.mu.Lock()
-		rf.setLastApplied(newLastApplied)
-		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), newLastApplied)
+		rf.setLastApplied(commitIdx)
+		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), commitIdx)
 		rf.mu.Unlock()
 	}
 }

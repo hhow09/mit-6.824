@@ -20,3 +20,9 @@ for i in $(seq 1 $TIMES); do
   echo "Running test 2D-$i"
   VERBOSE=1 go test ./raft/... -race -run 2D -count=1
 done
+
+# kvraft
+for i in $(seq 1 $TIMES); do
+  echo "Running test 3A-$i"
+  VERBOSE=1 go test ./kvraft/... -race -run=3A -count=1
+done
