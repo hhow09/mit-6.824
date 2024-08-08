@@ -39,6 +39,10 @@ type Op struct {
 	Type  OpType
 	Key   string
 	Value string
+	// (ClientID, RequestID) uniquely identify a client request
+	// they are used for de-dup check in apply()
+	ClientID  int64
+	RequestID int64
 }
 
 type stateMachine interface {
@@ -60,13 +64,19 @@ type KVServer struct {
 	currTerm     uint32
 	resChan      map[int]chan reply
 	stateMachine stateMachine
+	// lastOperation tracks the last operation for each client for de-dup
+	// since unreliable network may cause duplicated requests.
+	// It's maintained as a map from client id to last operation
+	lastOperation map[int64]ClientOpRecord
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	rep := kv.handleOp(Op{
-		Type: OpGet,
-		Key:  args.Key,
+		Type:      OpGet,
+		Key:       args.Key,
+		ClientID:  args.ClientID,
+		RequestID: args.RequestID,
 	})
 	reply.Value = rep.value
 	reply.Err = rep.err
@@ -75,8 +85,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	op := Op{
-		Key:   args.Key,
-		Value: args.Value,
+		Key:       args.Key,
+		Value:     args.Value,
+		ClientID:  args.ClientID,
+		RequestID: args.RequestID,
 	}
 	switch args.Op {
 	case "Put":
@@ -86,11 +98,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	rep := kv.handleOp(op)
 	reply.Err = rep.err
-}
-
-type reply struct {
-	value string
-	err   Err
 }
 
 func (kv *KVServer) handleOp(op Op) reply {
@@ -165,8 +172,54 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.stateMachine = NewInMemoryStateMachine()
+	kv.lastOperation = make(map[int64]ClientOpRecord)
 	go kv.apply()
 	return kv
+}
+
+func (kv *KVServer) apply() {
+	for !kv.killed() {
+		msg := <-kv.applyCh
+		if msg.CommandValid {
+			// de-dup
+			kv.mu.Lock()
+			var rep reply
+			op := msg.Command.(Op)
+			if record, ok := kv.alreadyRepliedRecord(op); ok {
+				rep = record.reply
+				// skip applying to state machine
+			} else {
+				rep = kv.applyToStateMachine(msg)
+				if op.Type != OpGet {
+					kv.setLastOperation(op, rep)
+				}
+			}
+			// only leader can reply
+			// since here could get the message from previous term (started by previous leader), we need to check the term
+			if currTerm, isLeader := kv.rf.GetState(); isLeader && currTerm == int(msg.CommandTerm) {
+				ch := kv.getResChan(msg.CommandIndex)
+				kv.mu.Unlock()
+				ch <- rep
+			} else {
+				kv.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (kv *KVServer) applyToStateMachine(msg raft.ApplyMsg) reply {
+	op := msg.Command.(Op)
+	rep := reply{}
+	switch op.Type {
+	case OpGet:
+		value := kv.stateMachine.Get(op.Key)
+		rep = reply{value: value}
+	case OpPut:
+		kv.stateMachine.Put(op.Key, op.Value)
+	case OpAppend:
+		kv.stateMachine.Append(op.Key, op.Value)
+	}
+	return rep
 }
 
 // server state
@@ -193,27 +246,18 @@ func (kv *KVServer) removeResChan(idx int) {
 	delete(kv.resChan, idx)
 }
 
-func (kv *KVServer) apply() {
-	for !kv.killed() {
-		msg := <-kv.applyCh
-		rep := reply{}
-		if msg.CommandValid {
-			op := msg.Command.(Op)
-			switch op.Type {
-			case OpGet:
-				value := kv.stateMachine.Get(op.Key)
-				rep = reply{value: value}
-			case OpPut:
-				kv.stateMachine.Put(op.Key, op.Value)
-			case OpAppend:
-				kv.stateMachine.Append(op.Key, op.Value)
-			}
-			kv.mu.RLock()
-			if currTerm, isLeader := kv.rf.GetState(); isLeader && currTerm == kv.getCurrTerm() {
-				kv.getResChan(msg.CommandIndex) <- rep
-			}
-			kv.mu.RUnlock()
-		}
+// alreadyRepliedRecord checks if the server has already replied to the client
+func (kv *KVServer) alreadyRepliedRecord(op Op) (ClientOpRecord, bool) {
+	if record, ok := kv.lastOperation[op.ClientID]; ok && record.RequestID >= op.RequestID {
+		return record, true
+	}
+	return ClientOpRecord{}, false
+}
 
+// setLastOperation sets the last operation of a client
+func (kv *KVServer) setLastOperation(op Op, rep reply) {
+	kv.lastOperation[op.ClientID] = ClientOpRecord{
+		RequestID: op.RequestID,
+		reply:     rep,
 	}
 }

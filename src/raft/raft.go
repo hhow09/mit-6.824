@@ -54,6 +54,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int32 // for state machine to check whether the command is outdated
 
 	// For 2D:
 	SnapshotValid bool
@@ -720,6 +721,7 @@ func (rf *Raft) applyMsgs() {
 				CommandValid: true,
 				Command:      entry.Command,
 				CommandIndex: entry.Index,
+				CommandTerm:  entry.Term,
 			}
 			msgs = append(msgs, msg)
 		}

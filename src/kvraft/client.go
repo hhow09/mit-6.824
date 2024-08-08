@@ -46,7 +46,7 @@ func (ck *Clerk) Get(key string) string {
 	req := GetArgs{
 		Key: key,
 		ArgsCommon: ArgsCommon{
-			ClientId:  ck.ID,
+			ClientID:  ck.ID,
 			RequestID: ck.requestIDCount,
 		},
 	}
@@ -76,7 +76,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Value: value,
 		Op:    op,
 		ArgsCommon: ArgsCommon{
-			ClientId:  ck.ID,
+			ClientID:  ck.ID,
 			RequestID: ck.requestIDCount,
 		},
 	}

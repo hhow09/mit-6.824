@@ -14,7 +14,7 @@ func isRetriableError(err Err) bool {
 }
 
 type ArgsCommon struct {
-	ClientId  int64
+	ClientID  int64
 	RequestID int64
 }
 
@@ -42,4 +42,13 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type ClientOpRecord struct {
+	RequestID int64
+	reply     reply
+}
+type reply struct {
+	value string
+	err   Err
 }
