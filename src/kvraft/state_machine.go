@@ -43,3 +43,12 @@ func (s *InMemoryStateMachine) EncodeSnapshot(encoder *labgob.LabEncoder) error 
 	}
 	return nil
 }
+
+func (s *InMemoryStateMachine) DecodeSnapshot(decoder *labgob.LabDecoder) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := decoder.Decode(&s.data); err != nil {
+		return err
+	}
+	return nil
+}

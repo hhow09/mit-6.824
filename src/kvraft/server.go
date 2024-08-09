@@ -2,6 +2,8 @@ package kvraft
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -52,6 +54,7 @@ type stateMachine interface {
 	Put(key string, value string)
 	Append(key string, value string)
 	EncodeSnapshot(*labgob.LabEncoder) error
+	DecodeSnapshot(*labgob.LabDecoder) error
 }
 
 type KVServer struct {
@@ -209,7 +212,13 @@ func (kv *KVServer) apply() {
 				}
 			}
 		} else if msg.SnapshotValid {
-			// TODO when leader sends snapshot to follower
+			kv.mu.Lock()
+			if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+				if err := kv.restoreSnapshot(msg.Snapshot); err != nil {
+					lablog.Debug(kv.me, lablog.Snapshot, "KVServer failed to restore snapshot: %w", err)
+				}
+			}
+			kv.mu.Unlock()
 		}
 	}
 }
@@ -224,6 +233,21 @@ func (kv *KVServer) snapshot(idx int) error {
 		return err
 	}
 	kv.rf.Snapshot(idx, w.Bytes())
+	return nil
+}
+
+func (kv *KVServer) restoreSnapshot(snapshot []byte) error {
+	if len(snapshot) == 0 {
+		return errors.New("empty snapshot")
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if err := kv.stateMachine.DecodeSnapshot(d); err != nil {
+		return fmt.Errorf("failed to decode state machine: %w", err)
+	}
+	if err := d.Decode(&kv.lastOperation); err != nil {
+		return fmt.Errorf("failed to decode last operation: %w", err)
+	}
 	return nil
 }
 

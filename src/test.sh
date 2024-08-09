@@ -29,5 +29,5 @@ done
 
 for i in $(seq 1 $TIMES); do
   echo "Running test 3B-$i"
-  VERBOSE=1 go test ./kvraft/... -race -run="(TestSnapshotRPC3B|TestSnapshotSize3B)" -count=1
+  VERBOSE=1 go test ./kvraft/... -race -run="(TestSnapshotRPC3B|TestSnapshotSize3B|TestSpeed3B)" -count=1
 done
