@@ -11,6 +11,11 @@
 ## 2A: leader election
 - Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/1
 
+### Task
+```
+Implement Raft leader election and heartbeats (AppendEntries RPCs with no log entries). The goal for Part 2A is for a single leader to be elected, for the leader to remain the leader if there are no failures, and for a new leader to take over if the old leader fails or if packets to/from the old leader are lost. Run go test -run 2A -race to test your 2A code. 
+```
+
 ### Overview
 - implement raft state machine
 - implement leader election
@@ -29,6 +34,11 @@
 
 ## 2B: log
 - Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/2
+
+### Task
+```
+Implement the leader and follower code to append new log entries, so that the go test -run 2B -race tests pass. 
+```
 
 ### Overview
 - implement leader replicating logs to 
@@ -89,6 +99,11 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
 ## 2C: persistence
 - Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/5
 
+### Task
+```
+Complete the functions persist() and readPersist() in raft.go by adding code to save and restore persistent state. You will need to encode (or "serialize") the state as an array of bytes in order to pass it to the Persister. Use the labgob encoder; see the comments in persist() and readPersist(). labgob is like Go's gob encoder but prints error messages if you try to encode structures with lower-case field names. 
+```
+
 ### Overview
 - implement state encoding and persistence based on the `Persistent state` in paper Fig. 2.
 - implement optimization of conflicting entry retry in at the bottom of paper page 7
@@ -105,8 +120,13 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
 ## 2D: log compaction
 - Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/5
 
+### Task
+```
+Modify your Raft code to support snapshots: implement Snapshot, CondInstallSnapshot, and the InstallSnapshot RPC, as well as the changes to Raft to support these (e.g, continue to operate with a trimmed log). Your solution is complete when it passes the 2D tests and all the Lab 2 tests. (Note that lab 3 will test snapshots more thoroughly than lab 2 because lab 3 has a real service to stress Raft's snapshots.) 
+```
+
 ### Overview
-- implement snapshot 
+- implement snapshot
 - implement sending snapshot to follower
 - implement log trimming when follower receiving snapshot.
 

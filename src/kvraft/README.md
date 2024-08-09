@@ -3,6 +3,8 @@
 - paper: https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf
 
 ## Part A: Key/value service without snapshots
+- Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/8
+
 ### Task 1
 ```
 Your first task is to implement a solution that works when there are no dropped messages, and no failed servers.
