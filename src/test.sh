@@ -26,3 +26,8 @@ for i in $(seq 1 $TIMES); do
   echo "Running test 3A-$i"
   VERBOSE=1 go test ./kvraft/... -race -run=3A -count=1
 done
+
+for i in $(seq 1 $TIMES); do
+  echo "Running test 3B-$i"
+  VERBOSE=1 go test ./kvraft/... -race -run="(TestSnapshotRPC3B|TestSnapshotSize3B)" -count=1
+done
