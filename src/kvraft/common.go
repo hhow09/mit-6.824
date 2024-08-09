@@ -46,9 +46,9 @@ type GetReply struct {
 
 type ClientOpRecord struct {
 	RequestID int64
-	reply     reply
+	Reply     reply
 }
 type reply struct {
-	value string
-	err   Err
+	Value string
+	Err   Err
 }

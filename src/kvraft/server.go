@@ -1,12 +1,14 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"6.824/labgob"
+	"6.824/lablog"
 	"6.824/labrpc"
 	"6.824/raft"
 )
@@ -49,6 +51,7 @@ type stateMachine interface {
 	Get(key string) string
 	Put(key string, value string)
 	Append(key string, value string)
+	EncodeSnapshot(*labgob.LabEncoder) error
 }
 
 type KVServer struct {
@@ -78,8 +81,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClientID:  args.ClientID,
 		RequestID: args.RequestID,
 	})
-	reply.Value = rep.value
-	reply.Err = rep.err
+	reply.Value = rep.Value
+	reply.Err = rep.Err
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -97,13 +100,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		op.Type = OpAppend
 	}
 	rep := kv.handleOp(op)
-	reply.Err = rep.err
+	reply.Err = rep.Err
 }
 
 func (kv *KVServer) handleOp(op Op) reply {
 	idx, currTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		return reply{err: ErrNotLeader}
+		return reply{Err: ErrNotLeader}
 	}
 	kv.mu.Lock()
 	kv.setCurrTerm(currTerm)
@@ -114,7 +117,7 @@ func (kv *KVServer) handleOp(op Op) reply {
 	case res := <-resChan:
 		return res
 	case <-time.After(timeout):
-		return reply{err: ErrTimeout}
+		return reply{Err: ErrTimeout}
 	}
 }
 
@@ -180,7 +183,7 @@ func (kv *KVServer) apply() {
 			var rep reply
 			op := msg.Command.(Op)
 			if record, ok := kv.alreadyRepliedRecord(op); ok {
-				rep = record.reply
+				rep = record.Reply
 				// skip applying to state machine
 			} else {
 				rep = kv.applyToStateMachine(msg)
@@ -197,8 +200,31 @@ func (kv *KVServer) apply() {
 			} else {
 				kv.mu.Unlock()
 			}
+
+			// Whenever your key/value server detects that the Raft state size is approaching this threshold,
+			// it should save a snapshot using Snapshot, which in turn uses persister.SaveRaftState().
+			if kv.needSnapshot() {
+				if err := kv.snapshot(msg.CommandIndex); err != nil {
+					lablog.Debug(kv.me, lablog.Snapshot, "KVServer failed to snapshot: %w", err)
+				}
+			}
+		} else if msg.SnapshotValid {
+			// TODO when leader sends snapshot to follower
 		}
 	}
+}
+
+func (kv *KVServer) snapshot(idx int) error {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := kv.stateMachine.EncodeSnapshot(e); err != nil {
+		return err
+	}
+	if err := e.Encode(kv.lastOperation); err != nil {
+		return err
+	}
+	kv.rf.Snapshot(idx, w.Bytes())
+	return nil
 }
 
 func (kv *KVServer) applyToStateMachine(msg raft.ApplyMsg) reply {
@@ -207,7 +233,7 @@ func (kv *KVServer) applyToStateMachine(msg raft.ApplyMsg) reply {
 	switch op.Type {
 	case OpGet:
 		value := kv.stateMachine.Get(op.Key)
-		rep = reply{value: value}
+		rep = reply{Value: value}
 	case OpPut:
 		kv.stateMachine.Put(op.Key, op.Value)
 	case OpAppend:
@@ -254,6 +280,15 @@ func (kv *KVServer) alreadyRepliedRecord(op Op) (ClientOpRecord, bool) {
 func (kv *KVServer) setLastOperation(op Op, rep reply) {
 	kv.lastOperation[op.ClientID] = ClientOpRecord{
 		RequestID: op.RequestID,
-		reply:     rep,
+		Reply:     rep,
 	}
+}
+
+func (kv *KVServer) needSnapshot() bool {
+	// You should compare maxraftstate to persister.RaftStateSize()
+	// If maxraftstate is -1, you do not have to snapshot.
+	if kv.maxraftstate != -1 && kv.rf.RaftStateSize() >= kv.maxraftstate {
+		return true
+	}
+	return false
 }

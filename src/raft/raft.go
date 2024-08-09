@@ -955,7 +955,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			SnapshotIndex: args.LastIncludedIndex,
 		}
 	}()
+}
 
+// RaftStateSize returns the size of the persisted state (3B)
+func (rf *Raft) RaftStateSize() int {
+	return rf.persister.RaftStateSize()
 }
 
 // the service or tester wants to create a Raft server. the ports
