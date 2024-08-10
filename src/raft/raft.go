@@ -930,7 +930,7 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	lablog.Debug(rf.me, lablog.Snapshot, "received snapshot from leader %d at term %d. %+v ", args.LeaderId, rf.getCurrentTerm(), *args)
+	lablog.Debug(rf.me, lablog.Snapshot, "received snapshot[%d] from leader %d at term %d. LastIncludedTerm: %d, LastIncludedIndex: %d ", len(args.Snapshot), args.LeaderId, rf.getCurrentTerm(), args.LastIncludedIndex, args.LastIncludedTerm)
 	if args.Term < rf.getCurrentTerm() {
 		rf.mu.Unlock()
 		return

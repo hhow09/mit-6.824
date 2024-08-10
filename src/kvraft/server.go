@@ -173,6 +173,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.stateMachine = NewInMemoryStateMachine()
 	kv.lastOperation = make(map[int64]ClientOpRecord)
+	b := persister.ReadSnapshot()
+	if len(b) > 0 {
+		if err := kv.restoreSnapshot(b); err != nil {
+			lablog.Debug(kv.me, lablog.Snapshot, "KVServer failed to restore snapshot: %w", err)
+		}
+	}
 	go kv.apply()
 	return kv
 }
