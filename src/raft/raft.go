@@ -731,7 +731,11 @@ func (rf *Raft) applyMsgs() {
 			rf.applyCh <- msg
 		}
 		rf.mu.Lock()
-		rf.setLastApplied(commitIdx)
+		// Tricky: commitIdx might already chaned, so we need to use commitIdx instead of rf.commitIndex
+		// when concurrently CondInstallSnapshot, we should not allow lastApplied to roll back.
+		// if commitIdx is updated by install snapshot, state machine can directly use the data from snapshot.
+		// bug: https://github.com/hhow09/mit-6.824/issues/10
+		rf.setLastApplied(labutil.Max(commitIdx, rf.getLastApplied()))
 		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), commitIdx)
 		rf.mu.Unlock()
 	}
