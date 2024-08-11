@@ -874,16 +874,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.XTerm, reply.XIndex = -1, -1
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if args.PrevLogIndex > rf.lastLogIndex() {
+	if args.PrevLogIndex > rf.lastLogIndex() || args.PrevLogIndex < rf.baseIndex() {
 		// If a follower does not have prevLogIndex in its log,
 		// it should return with conflictIndex = len(log) and conflictTerm = None.
 		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
-		lablog.Debug(rf.me, lablog.Append, "not success: log too short, prevLogIndex=%d, but log last index=%d", args.PrevLogIndex, rf.lastLogIndex())
+		lablog.Debug(rf.me, lablog.Append, "not success: node does not contains prevLogIndex=%d, but log last index=%d", args.PrevLogIndex, rf.lastLogIndex())
 		reply.Success = false
 		reply.XIndex = rf.lastLogIndex() + 1
 		rf.persist()
 		return
-	} else if args.PrevLogIndex >= 0 && rf.logEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
+	} else if rf.logEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
 		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.logEntry(args.PrevLogIndex).Term)
 		// If an existing entry conflicts with a new one (same index but different terms)
 		reply.Success = false
@@ -930,7 +930,7 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	lablog.Debug(rf.me, lablog.Snapshot, "received snapshot[%d] from leader %d at term %d. LastIncludedTerm: %d, LastIncludedIndex: %d ", len(args.Snapshot), args.LeaderId, rf.getCurrentTerm(), args.LastIncludedIndex, args.LastIncludedTerm)
+	lablog.Debug(rf.me, lablog.Snapshot, "received snapshot[%d] from leader %d at term %d. LastIncludedTerm: %d, LastIncludedIndex: %d ", len(args.Snapshot), args.LeaderId, rf.getCurrentTerm(), args.LastIncludedTerm, args.LastIncludedIndex)
 	if args.Term < rf.getCurrentTerm() {
 		rf.mu.Unlock()
 		return
