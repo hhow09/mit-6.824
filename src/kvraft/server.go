@@ -191,7 +191,10 @@ func (kv *KVServer) apply() {
 			kv.mu.Lock()
 			var rep reply
 			op := msg.Command.(Op)
-			if record, ok := kv.alreadyRepliedRecord(op); ok {
+			// put and append: de duplicate write operation
+			// get: read-only, we could read state machine directly to get latest value
+			// if we de-dup get, result in non-linearizable bug.
+			if record, ok := kv.alreadyRepliedRecord(op); op.Type != OpGet && ok {
 				rep = record.Reply
 				// skip applying to state machine
 			} else {
