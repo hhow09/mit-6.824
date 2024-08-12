@@ -735,8 +735,9 @@ func (rf *Raft) applyMsgs() {
 		// when concurrently CondInstallSnapshot, we should not allow lastApplied to roll back.
 		// if commitIdx is updated by install snapshot, state machine can directly use the data from snapshot.
 		// bug: https://github.com/hhow09/mit-6.824/issues/10
-		rf.setLastApplied(labutil.Max(commitIdx, rf.getLastApplied()))
-		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), commitIdx)
+		newLastApplied := labutil.Max(commitIdx, rf.getLastApplied())
+		rf.setLastApplied(newLastApplied)
+		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), newLastApplied)
 		rf.mu.Unlock()
 	}
 }
@@ -906,7 +907,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else {
 		lablog.Debug(rf.me, lablog.Append, "append logs %+v", args.Logs)
-		rf.appendLogs(args.PrevLogIndex, args.Logs) // delete the existing entry and all that follow it and Append any new entries not already in the log
+		rf.appendLogs(args.PrevLogIndex, args.Logs)
 		reply.Success = true
 	}
 	// only when success

@@ -223,13 +223,18 @@ func (rf *raftState) appendLog(le LogEntry) (index int) {
 	return le.Index
 }
 
-// append the log entries to the log state starting from the given index
-func (r *raftState) appendLogs(idx int, les []LogEntry) {
-	base := r.baseIndex()
-	if idx < base {
+// appendLogs delete the existing entry and all that follow it and Append any new entries not already in the log
+func (rf *raftState) appendLogs(prevLogIndex int, entries []LogEntry) {
+	base := rf.baseIndex()
+	if prevLogIndex < base {
 		panic("invalid index")
 	}
-	r.logs = append(r.logs[0:(idx-base)+1], les...)
+	for idx, ent := range entries {
+		if ent.Index-base >= len(rf.logs) || rf.logs[ent.Index-base].Term != ent.Term {
+			rf.logs = append(rf.logs[:(ent.Index-base)], entries[idx:]...)
+			break
+		}
+	}
 }
 
 func (rf *raftState) setCommitIndex(i int) {
