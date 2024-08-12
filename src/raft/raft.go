@@ -731,7 +731,7 @@ func (rf *Raft) applyMsgs() {
 			rf.applyCh <- msg
 		}
 		rf.mu.Lock()
-		// Tricky: commitIdx might already chaned, so we need to use commitIdx instead of rf.commitIndex
+		// Tricky: commitIdx might already changed, so we need to use commitIdx instead of rf.commitIndex
 		// when concurrently CondInstallSnapshot, we should not allow lastApplied to roll back.
 		// if commitIdx is updated by install snapshot, state machine can directly use the data from snapshot.
 		// bug: https://github.com/hhow09/mit-6.824/issues/10
