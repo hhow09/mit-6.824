@@ -632,7 +632,7 @@ func (rf *Raft) appendEntries(nodeID int, args *AppendEntriesArgs) {
 			// #2 If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
 			// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
 			// #1
-			for index := args.PrevLogIndex - 1; index >= 0; index-- {
+			for index := args.PrevLogIndex - 1; index >= rf.baseIndex(); index-- {
 				if rf.logEntry(index).Term == reply.XTerm {
 					conflictTermIndex = index
 					break
