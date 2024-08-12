@@ -896,7 +896,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
 		conflictingTerm := rf.logEntry(args.PrevLogIndex).Term
 		reply.XTerm = conflictingTerm
-		for i := 1; i <= args.PrevLogIndex; i++ {
+		for i := rf.baseIndex(); i <= args.PrevLogIndex; i++ {
 			if rf.logEntry(i).Term == conflictingTerm {
 				reply.XIndex = i
 				break
