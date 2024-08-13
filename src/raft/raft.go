@@ -263,12 +263,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// follower need to remember which candidate it voted
 		// persist votedFor to avoid voting twice within one term
 		rf.setVotedFor(args.CandidateId)
+		rf.persist()
+		rf.mu.Unlock()
+		// If election timeout elapses without receiving AppendEntries RPC from current leader or
+		// granting vote to candidate: convert to candidate (§5.2)
+		// IMPORTANT: otherwise, the follower will frequently timeout and start a new election
+		// IMPORTANT: only reset when vote is granted, otherwise some potential leader might not be able to raise an election
+		rf.heartbeatCh <- true
+	} else {
+		rf.persist()
+		rf.mu.Unlock()
 	}
-	rf.persist()
-	rf.mu.Unlock()
-	// IMPORTANT: to reset election timeout
-	// otherwise, the follower will frequently timeout and start a new election
-	rf.heartbeatCh <- true
 }
 
 // isMoreUpToDate determines if the given (term, lastIndex) log is more up-to-date by comparing the index
