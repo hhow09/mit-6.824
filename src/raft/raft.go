@@ -632,7 +632,7 @@ func (rf *Raft) appendEntries(nodeID int, args *AppendEntriesArgs) {
 			// #2 If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
 			// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
 			// #1
-			for index := args.PrevLogIndex - 1; index >= 0; index-- {
+			for index := args.PrevLogIndex - 1; index >= rf.baseIndex(); index-- {
 				if rf.logEntry(index).Term == reply.XTerm {
 					conflictTermIndex = index
 					break
@@ -731,8 +731,13 @@ func (rf *Raft) applyMsgs() {
 			rf.applyCh <- msg
 		}
 		rf.mu.Lock()
-		rf.setLastApplied(commitIdx)
-		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), commitIdx)
+		// Tricky: commitIdx might already changed, so we need to use commitIdx instead of rf.commitIndex
+		// when concurrently CondInstallSnapshot, we should not allow lastApplied to roll back.
+		// if commitIdx is updated by install snapshot, state machine can directly use the data from snapshot.
+		// bug: https://github.com/hhow09/mit-6.824/issues/10
+		newLastApplied := labutil.Max(commitIdx, rf.getLastApplied())
+		rf.setLastApplied(newLastApplied)
+		lablog.Debug(rf.me, lablog.Info, "applied %d messages, set last applied: %d", len(msgs), newLastApplied)
 		rf.mu.Unlock()
 	}
 }
@@ -874,16 +879,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.XTerm, reply.XIndex = -1, -1
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if args.PrevLogIndex > rf.lastLogIndex() {
+	if args.PrevLogIndex > rf.lastLogIndex() || args.PrevLogIndex < rf.baseIndex() {
 		// If a follower does not have prevLogIndex in its log,
 		// it should return with conflictIndex = len(log) and conflictTerm = None.
 		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
-		lablog.Debug(rf.me, lablog.Append, "not success: log too short, prevLogIndex=%d, but log last index=%d", args.PrevLogIndex, rf.lastLogIndex())
+		lablog.Debug(rf.me, lablog.Append, "not success: node does not contains prevLogIndex=%d, but log last index=%d", args.PrevLogIndex, rf.lastLogIndex())
 		reply.Success = false
 		reply.XIndex = rf.lastLogIndex() + 1
 		rf.persist()
 		return
-	} else if args.PrevLogIndex >= 0 && rf.logEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
+	} else if rf.logEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
 		lablog.Debug(rf.me, lablog.Append, "not success 2 prevLogIndex=%d, prevLogTerm=%d, but log[%d].Term=%d", args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, rf.logEntry(args.PrevLogIndex).Term)
 		// If an existing entry conflicts with a new one (same index but different terms)
 		reply.Success = false
@@ -892,7 +897,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// ref: https://thesquareplanet.com/blog/students-guide-to-raft/#an-aside-on-optimizations
 		conflictingTerm := rf.logEntry(args.PrevLogIndex).Term
 		reply.XTerm = conflictingTerm
-		for i := 1; i <= args.PrevLogIndex; i++ {
+		for i := rf.baseIndex(); i <= args.PrevLogIndex; i++ {
 			if rf.logEntry(i).Term == conflictingTerm {
 				reply.XIndex = i
 				break
@@ -902,7 +907,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else {
 		lablog.Debug(rf.me, lablog.Append, "append logs %+v", args.Logs)
-		rf.appendLogs(args.PrevLogIndex, args.Logs) // delete the existing entry and all that follow it and Append any new entries not already in the log
+		rf.appendLogs(args.PrevLogIndex, args.Logs)
 		reply.Success = true
 	}
 	// only when success
@@ -930,7 +935,7 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	lablog.Debug(rf.me, lablog.Snapshot, "received snapshot from leader %d at term %d. %+v ", args.LeaderId, rf.getCurrentTerm(), *args)
+	lablog.Debug(rf.me, lablog.Snapshot, "received snapshot[%d] from leader %d at term %d. LastIncludedTerm: %d, LastIncludedIndex: %d ", len(args.Snapshot), args.LeaderId, rf.getCurrentTerm(), args.LastIncludedTerm, args.LastIncludedIndex)
 	if args.Term < rf.getCurrentTerm() {
 		rf.mu.Unlock()
 		return
@@ -955,7 +960,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			SnapshotIndex: args.LastIncludedIndex,
 		}
 	}()
+}
 
+// RaftStateSize returns the size of the persisted state (3B)
+func (rf *Raft) RaftStateSize() int {
+	return rf.persister.RaftStateSize()
 }
 
 // the service or tester wants to create a Raft server. the ports

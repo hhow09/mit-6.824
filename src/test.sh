@@ -1,28 +1,12 @@
 set -ex
 
 TIMES=10
-for i in $(seq 1 $TIMES); do
-  echo "Running test 2A-$i"
-  VERBOSE=1 go test ./raft/... -race -run 2A -count=1
-done
-
-for i in $(seq 1 $TIMES); do
-  echo "Running test 2B-$i"
-  VERBOSE=1 go test ./raft/... -race -run 2B -count=1
-done
-
-for i in $(seq 1 $TIMES); do
-  echo "Running test 2C-$i"
-  VERBOSE=1 go test ./raft/... -race -run 2C -count=1
-done
-
-for i in $(seq 1 $TIMES); do
-  echo "Running test 2D-$i"
-  VERBOSE=1 go test ./raft/... -race -run 2D -count=1
-done
-
+# raft
+VERBOSE=1 go test ./raft/... -race -run 2A -count="$TIMES" -failfast -timeout="$((TIMES*5))m"
+VERBOSE=1 go test ./raft/... -race -run 2B -count="$TIMES" -failfast -timeout="$((TIMES*5))m"
+VERBOSE=1 go test ./raft/... -race -run 2C -count="$TIMES" -failfast -timeout="$((TIMES*5))m"
+VERBOSE=1 go test ./raft/... -race -run 2D -count="$TIMES" -failfast -timeout="$((TIMES*5))m"
 # kvraft
-for i in $(seq 1 $TIMES); do
-  echo "Running test 3A-$i"
-  VERBOSE=1 go test ./kvraft/... -race -run=3A -count=1
-done
+VERBOSE=1 go test ./kvraft/... -race -run=3A -count="$TIMES" -failfast -timeout="$((TIMES*5))m"
+VERBOSE=1 go test ./kvraft/... -race -run=3B -count="$TIMES" -failfast -timeout="$((TIMES*5))m" 
+
