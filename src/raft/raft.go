@@ -263,12 +263,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// follower need to remember which candidate it voted
 		// persist votedFor to avoid voting twice within one term
 		rf.setVotedFor(args.CandidateId)
+		rf.persist()
+		rf.mu.Unlock()
+		// If election timeout elapses without receiving AppendEntries RPC from current leader or
+		// granting vote to candidate: convert to candidate (§5.2)
+		// IMPORTANT: otherwise, the follower will frequently timeout and start a new election
+		// IMPORTANT: only reset when vote is granted, otherwise some potential leader might not be able to raise an election
+		rf.heartbeatCh <- true
+	} else {
+		rf.persist()
+		rf.mu.Unlock()
 	}
-	rf.persist()
-	rf.mu.Unlock()
-	// IMPORTANT: to reset election timeout
-	// otherwise, the follower will frequently timeout and start a new election
-	rf.heartbeatCh <- true
 }
 
 // isMoreUpToDate determines if the given (term, lastIndex) log is more up-to-date by comparing the index
@@ -290,16 +295,19 @@ func (rf *Raft) isMoreUpToDate(reqTerm int32, reqIdx int) bool {
 // only call while holding the lock
 func (rf *Raft) becomeFollower(term int32) {
 	lablog.Debug(rf.me, lablog.Info, "become follower at term=%d", term)
-	rf.resetChs()
-	prevState := rf.getState()
-	rf.setState(Follower)
+	if rf.getState() != Follower {
+		// don't block when concurrently executing becomeFollower and becomeCandidate
+		select {
+		case rf.stepDownCh <- true:
+		default:
+		}
+	}
 	rf.setVotedFor(voteForNull)
 	rf.setCurrentTerm(term)
 	rf.setNextIndex(nil)  // leader only state
 	rf.setMatchIndex(nil) // leader only state
-	if prevState != Follower {
-		rf.stepDownCh <- true
-	}
+	rf.resetChs()
+	rf.setState(Follower)
 }
 
 // request vote which save response grant to chan
@@ -314,7 +322,10 @@ func (rf *Raft) requestVote(peer int, args *RequestVoteArgs, grantCount *uint32)
 	reply := &RequestVoteReply{}
 	sendOk := rf.sendRequestVote(peer, args, reply)
 	lablog.Debug(rf.me, lablog.Vote, "received vote reply from node %d: %+v", peer, reply)
-
+	if rf.invalidCandidateState(args.Term) {
+		lablog.Debug(rf.me, lablog.Vote, "not candidate anymore, early exit")
+		return
+	}
 	if !sendOk {
 		lablog.Debug(rf.me, lablog.Vote, "vote request of term %d to %d was dropped", args.Term, peer)
 		return
@@ -608,6 +619,9 @@ func (rf *Raft) appendEntries(nodeID int, args *AppendEntriesArgs) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.getState() != Leader || rf.getCurrentTerm() != args.Term {
+		return
+	}
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower (§5.1)
 	if reply.Term > args.Term {
