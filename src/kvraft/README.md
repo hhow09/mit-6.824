@@ -28,3 +28,38 @@ Add code to handle failures, and to cope with duplicate Clerk requests, includin
 - [raft](../raft) code are slightly updated for performance.
 - For each request, server `Start()` then waits for raft applying message through `applyCh`.
     - multiple command could wait concurrently
+ 
+## Part B: Key/value service with snapshots 
+### Task
+```
+ Modify your kvserver so that it detects when the persisted Raft state grows too large, and then hands a snapshot to Raft. When a kvserver server restarts, it should read the snapshot from persister and restore its state from the snapshot. 
+```
+### Notes
+- the state to detect duplicate message should also be persisted
+
+## Test Results (Lab 2 + Lab 3)
+```
+$ ./test.sh > log.txt
++ TIMES=10
++ VERBOSE=1
++ go test ./raft/... -race -run 2A -count=10 -failfast -timeout=50m
++ VERBOSE=1
++ go test ./raft/... -race -run 2B -count=10 -failfast -timeout=50m
++ VERBOSE=1
++ go test ./raft/... -race -run 2C -count=10 -failfast -timeout=50m
++ VERBOSE=1
++ go test ./raft/... -race -run 2D -count=10 -failfast -timeout=50m
++ VERBOSE=1
++ go test ./kvraft/... -race -run=3A -count=10 -failfast -timeout=50m
++ VERBOSE=1
++ go test ./kvraft/... -race -run=3B -count=10 -failfast -timeout=50m
+
+
+$ cat log.txt
+ok  	6.824/raft	163.091s
+ok  	6.824/raft	573.147s
+ok  	6.824/raft	1371.224s
+ok  	6.824/raft	1886.654s
+ok  	6.824/kvraft	2723.791s
+ok  	6.824/kvraft	1570.437s
+```

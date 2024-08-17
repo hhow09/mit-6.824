@@ -8,6 +8,27 @@
 ```
 - test 10 times to ensure consistently corret.
 
+## Overview
+### State Transition
+```mermaid
+stateDiagram-v2
+    Start --> Follower: read snapshot
+    Follower --> Follower: receive heartbeat / log
+    Follower --> Candidate(sending): election timeout
+    Candidate(sending) --> Candidate(collecting): vote sent
+    Candidate(collecting) --> Candidate(sending): timeout
+    Candidate(collecting) --> Candidate(sending): not enough votes
+    Candidate(collecting) --> Leader: receive votes > majority
+    
+    %% setp down
+    Leader --> Follower: receive RPC of higher term
+    Candidate(collecting) --> Follower: receive RPC of higher term
+    Candidate(sending) --> Follower: receive RPC of higher term
+
+    %% notes
+    note right of Leader : Sending heratbeat / logs
+```
+
 ## 2A: leader election
 - Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/1
 
