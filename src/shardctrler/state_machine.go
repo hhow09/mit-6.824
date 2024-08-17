@@ -197,9 +197,9 @@ func maxShardsGroup(groupsShardsMap map[int][]int) (int, int) {
 	sort.Ints(ids)
 
 	maxShards, maxGroupID := -1, -1
-	for groupID, shards := range groupsShardsMap {
-		if len(shards) > maxShards {
-			maxShards = len(shards)
+	for _, groupID := range ids {
+		if len(groupsShardsMap[groupID]) > maxShards {
+			maxShards = len(groupsShardsMap[groupID])
 			maxGroupID = groupID
 		}
 	}
