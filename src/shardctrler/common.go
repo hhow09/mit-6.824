@@ -17,6 +17,8 @@ package shardctrler
 // You will need to add fields to the RPC argument structs.
 //
 
+// Shards:  shard is a subset of the key/value pairs
+
 // The number of shards.
 const NShards = 10
 
@@ -29,13 +31,15 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK         = "OK"
+	ErrTimeout = "TIMEOUT"
 )
 
 type Err string
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+	ArgsCommon
 }
 
 type JoinReply struct {
@@ -45,6 +49,7 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GIDs []int
+	ArgsCommon
 }
 
 type LeaveReply struct {
@@ -55,6 +60,7 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+	ArgsCommon
 }
 
 type MoveReply struct {
@@ -64,9 +70,26 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+	ArgsCommon
 }
 
 type QueryReply struct {
+	WrongLeader bool
+	Err         Err
+	Config      Config
+}
+
+type ArgsCommon struct {
+	ClientID  int64
+	RequestID int64
+}
+
+type ClientOpRecord struct {
+	RequestID int64
+	Reply     reply
+}
+
+type reply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
