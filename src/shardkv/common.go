@@ -12,12 +12,13 @@ import "6.824/shardctrler"
 //
 
 const (
-	OK             = "OK"
+	// OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
 	ErrStaleConfig = "ErrStaleConfig"
+	ErrNotReady    = "ErrNotReady"
 )
 
 type Err string
@@ -25,8 +26,9 @@ type Err string
 type CommandType string
 
 const (
-	CommandOp     CommandType = "CommandOp"
-	CommandConfig CommandType = "CommandConfig"
+	CommandOp          CommandType = "Op"
+	CommandConfig      CommandType = "Config"
+	CommandInsertShard CommandType = "InsertShard"
 )
 
 // implement stringer
@@ -48,6 +50,18 @@ const (
 	OpPut
 	OpAppend
 )
+
+func (opType OpType) String() string {
+	switch opType {
+	case OpGet:
+		return "Get"
+	case OpPut:
+		return "Put"
+	case OpAppend:
+		return "Append"
+	}
+	return "Unknown"
+}
 
 // same as lab3
 type Op struct {
@@ -74,6 +88,13 @@ func NewConfigCommand(config shardctrler.Config) Command {
 	return Command{
 		Type: CommandConfig,
 		Data: config,
+	}
+}
+
+func NewInsertShardCommand(res ShardInterServerResponse) Command {
+	return Command{
+		Type: CommandInsertShard,
+		Data: res,
 	}
 }
 
@@ -114,7 +135,28 @@ type ClientOpRecord struct {
 	RequestID int64
 	Reply     reply
 }
+
+func (c ClientOpRecord) DCopy() ClientOpRecord {
+	return ClientOpRecord{
+		RequestID: c.RequestID,
+		Reply:     c.Reply,
+	}
+}
+
 type reply struct {
 	Value string
 	Err   Err
+}
+
+// server - server
+type ShardInterServerRequest struct {
+	ConfigNum int
+	ShardIDs  []int
+}
+
+type ShardInterServerResponse struct {
+	ConfigNum     int
+	Shards        map[int]map[string]string
+	LastOperation map[int64]ClientOpRecord
+	Err           Err
 }

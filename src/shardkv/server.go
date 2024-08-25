@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	timeout              = 3 * time.Second
-	updateConfigInterval = 100 * time.Millisecond
+	timeout         = 3 * time.Second
+	monitorInterval = 100 * time.Millisecond
 )
 
 type ShardKV struct {
@@ -43,6 +43,10 @@ type ShardKV struct {
 	lastConfig    shardctrler.Config
 	shards        Shards
 }
+
+// =================
+// CLIENT-FACING RPC
+// =================
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
@@ -139,6 +143,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(Op{})
 	labgob.Register(Command{})
 	labgob.Register(shardctrler.Config{})
+	labgob.Register(ShardInterServerRequest{})
+	labgob.Register(ShardInterServerResponse{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -171,6 +177,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// goroutines
 	go kv.apply()
 	go kv.monitorConfigChange()
+	go kv.monitorPulling()
+	// TODO
 
 	return kv
 }
@@ -182,6 +190,7 @@ func (kv *ShardKV) apply() {
 			kv.mu.Lock()
 			var rep reply
 			cmd := msg.Command.(Command)
+			lablog.DebugS(kv.gid, kv.me, lablog.Apply, "KVServer %d apply command %+v", kv.me, cmd)
 			switch cmd.Type {
 			case CommandOp:
 				op := cmd.Data.(Op)
@@ -190,7 +199,9 @@ func (kv *ShardKV) apply() {
 			case CommandConfig:
 				nxtConfig := cmd.Data.(shardctrler.Config)
 				rep = kv.applyConfig(&nxtConfig)
-
+			case CommandInsertShard:
+				res := cmd.Data.(ShardInterServerResponse)
+				kv.applyInsertShards(&res)
 			}
 			// only reply to CommandOp
 			// only leader can reply
@@ -246,19 +257,43 @@ func (kv *ShardKV) applyConfig(nextConfig *shardctrler.Config) reply {
 	if nextConfig.Num != kv.currentConfig.Num+1 {
 		return reply{Value: "", Err: ErrStaleConfig}
 	}
-	// TODO update shards
+	lablog.DebugS(kv.gid, kv.me, lablog.SConfig, "applyConfig %+v", nextConfig)
+	kv.updateShardStatus(nextConfig)
 	kv.lastConfig = kv.currentConfig
 	kv.currentConfig = *nextConfig
-	return reply{OK, ""}
+	return reply{"OK", ""} // actually not read by client
+}
+
+// updateShardStatus mark the shards that need to be migrated
+func (kv *ShardKV) updateShardStatus(nextConfig *shardctrler.Config) {
+	for i := 0; i < shardctrler.NShards; i++ {
+		// this shard will join to this group
+		if kv.currentConfig.Shards[i] != kv.gid && nextConfig.Shards[i] == kv.gid {
+			gid := kv.currentConfig.Shards[i]
+			if gid != 0 {
+				lablog.DebugS(kv.gid, kv.me, lablog.SConfig, "shard %d will be pulled from %d", i, gid)
+				kv.shards[i].SetStatus(Pulling)
+			}
+		}
+		// this shard doesn't belong to this group
+		if kv.currentConfig.Shards[i] == kv.gid && nextConfig.Shards[i] != kv.gid {
+			gid := nextConfig.Shards[i]
+			if gid != 0 {
+				lablog.DebugS(kv.gid, kv.me, lablog.SConfig, "shard %d will be pulled by %d", i, gid)
+				kv.shards[i].SetStatus(PulledByOthers)
+			}
+		}
+	}
 }
 
 // whether the server can serve this shard
 func (kv *ShardKV) canServeThisShard(shardID int) bool {
-	// TODO check shard status
-	return kv.currentConfig.Shards[shardID] == kv.gid
+	shard := kv.shards[shardID]
+	return kv.currentConfig.Shards[shardID] == kv.gid && (shard.GetStatus() == Serving || shard.GetStatus() == Cleaning)
 }
 
 func (kv *ShardKV) applyToShards(op Op, shardID int) reply {
+	lablog.DebugS(kv.gid, kv.me, lablog.Apply, "KVServer %d applyToShards %+v", kv.me, op)
 	rep := reply{}
 	shard := kv.shards[shardID]
 	switch op.Type {
@@ -273,6 +308,34 @@ func (kv *ShardKV) applyToShards(op Op, shardID int) reply {
 	return rep
 }
 
+// applyInsertShards insert the shards to the state machine
+func (kv *ShardKV) applyInsertShards(response *ShardInterServerResponse) {
+	if response.ConfigNum != kv.currentConfig.Num {
+		lablog.DebugS(kv.gid, kv.me, lablog.Apply, "KVServer %d reject stale response from stal config %+v", kv.me, response)
+		return
+	}
+
+	lablog.DebugS(kv.gid, kv.me, lablog.Apply, "KVServer %d applyInsertShards %+v", kv.me, response)
+	for shardId, shardData := range response.Shards {
+		shard := kv.shards[shardId]
+		if shard.GetStatus() == Pulling {
+			kv.shards[shardId] = NewNewShardFromData(shardData, Cleaning)
+		} else {
+			// duplicated insert
+			break
+		}
+	}
+	for clientId, rec := range response.LastOperation {
+		if _, ok := kv.lastOperation[clientId]; !ok {
+			kv.lastOperation[clientId] = rec
+		}
+	}
+}
+
+// ===============
+// MONITOR ROUTINE
+// ===============
+
 // monitorConfigChange checks if there is a new configuration
 // Your server will need to periodically poll the shardctrler to learn about new configurations.
 // The tests expect that your code polls roughly every 100 milliseconds;
@@ -281,21 +344,83 @@ func (kv *ShardKV) monitorConfigChange() {
 	for !kv.killed() {
 		kv.mu.RLock()
 		currConfigNum := kv.currentConfig.Num
+		// the wait for current shard migration to finish
+		if !kv.shards.ReadyForNewConfig() {
+			kv.mu.RUnlock()
+			time.Sleep(monitorInterval)
+			continue
+		}
+
 		kv.mu.RUnlock()
 		if _, isLeader := kv.rf.GetState(); isLeader {
 			nextConfig := kv.ctrlerClient.Query(currConfigNum + 1)
-			fmt.Printf("kv %d, nextConfig: %+v\n", kv.me, nextConfig)
-			// TODO migrate existing shards
 			if nextConfig.Num == currConfigNum+1 {
 				kv.rf.Start(NewConfigCommand(nextConfig))
 			}
 		}
-		time.Sleep(updateConfigInterval)
+		time.Sleep(monitorInterval)
 	}
 }
 
+func (kv *ShardKV) monitorPulling() {
+	for !kv.killed() {
+		kv.mu.RLock()
+		groups := kv.getGIDShardIDsByStatus(Pulling)
+		var wg sync.WaitGroup
+		cfgNum := kv.currentConfig.Num
+		for _, gp := range groups {
+			wg.Add(1)
+			go func(servers []string, shrardIDs []int, cfgNum int) {
+				req := ShardInterServerRequest{
+					ConfigNum: cfgNum,
+					ShardIDs:  shrardIDs,
+				}
+				for _, server := range servers {
+					srv := kv.make_end(server)
+					var resp ShardInterServerResponse
+					if srv.Call("ShardKV.PullShardRPC", &req, &resp) && resp.Err == "" {
+						kv.rf.Start(NewInsertShardCommand(resp))
+					}
+				}
+
+			}(gp.servers, gp.shardIDs, cfgNum)
+		}
+		kv.mu.RUnlock()
+		wg.Wait()
+		time.Sleep(monitorInterval)
+	}
+}
+
+type groupResponse struct {
+	servers  []string
+	shardIDs []int
+}
+
+// getGIDShardIDsByStatus returns a list of filtered groupServerAndShards
+func (kv *ShardKV) getGIDShardIDsByStatus(s ShardStatus) []groupResponse {
+	gid2shardIDs := make(map[int][]int)
+	ids := kv.shards.ShardsByStatus(s)
+	for _, i := range ids {
+		// use lastConfig since we are migrating the last config
+		gid := kv.lastConfig.Shards[i]
+		if gid != 0 {
+			if _, ok := gid2shardIDs[gid]; !ok {
+				gid2shardIDs[gid] = make([]int, 0)
+			}
+			gid2shardIDs[gid] = append(gid2shardIDs[gid], i)
+		}
+	}
+	res := make([]groupResponse, 0)
+	for gid, shardIDs := range gid2shardIDs {
+		res = append(res, groupResponse{
+			servers:  kv.lastConfig.Groups[gid],
+			shardIDs: shardIDs,
+		})
+	}
+	return res
+}
+
 func (kv *ShardKV) snapshot(idx int) error {
-	// TODO
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if err := kv.shards.EncodeSnapshot(e); err != nil {
@@ -304,12 +429,17 @@ func (kv *ShardKV) snapshot(idx int) error {
 	if err := e.Encode(kv.lastOperation); err != nil {
 		return err
 	}
+	if err := e.Encode(kv.currentConfig); err != nil {
+		return err
+	}
+	if err := e.Encode(kv.lastConfig); err != nil {
+		return err
+	}
 	kv.rf.Snapshot(idx, w.Bytes())
 	return nil
 }
 
 func (kv *ShardKV) restoreSnapshot(snapshot []byte) error {
-	// TODO
 	if len(snapshot) == 0 {
 		return errors.New("empty snapshot")
 	}
@@ -321,10 +451,52 @@ func (kv *ShardKV) restoreSnapshot(snapshot []byte) error {
 	if err := d.Decode(&kv.lastOperation); err != nil {
 		return fmt.Errorf("failed to decode last operation: %w", err)
 	}
+	if err := d.Decode(&kv.currentConfig); err != nil {
+		return fmt.Errorf("failed to decode current config: %w", err)
+	}
+	if err := d.Decode(&kv.lastConfig); err != nil {
+		return fmt.Errorf("failed to decode last config: %w", err)
+	}
 	return nil
 }
 
-// server state
+// ================
+// INTER-SERVER RPC
+// ================
+func (kv *ShardKV) PullShardRPC(request *ShardInterServerRequest, response *ShardInterServerResponse) {
+	lablog.DebugS(kv.gid, kv.me, lablog.ShardOp, "KVServer %d received PullShardRPC %+v", kv.me, request)
+	// only pull shards from leader
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		response.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+
+	if kv.currentConfig.Num < request.ConfigNum {
+		response.Err = ErrNotReady
+		return
+	}
+
+	// If one of your RPC handlers includes in its reply a map (e.g. a key/value map) that's part of your server's state, you may get bugs due to races.
+	// The RPC system has to read the map in order to send it to the caller, but it isn't holding a lock that covers the map. Your server, however, may proceed to modify the same map while the RPC system is reading it.
+	// The solution is for the RPC handler to include a copy of the map in the reply.
+	response.Shards = make(map[int]map[string]string)
+	for _, shardID := range request.ShardIDs {
+		response.Shards[shardID] = kv.shards[shardID].DCopyData()
+	}
+
+	response.LastOperation = make(map[int64]ClientOpRecord)
+	for clientID, operation := range kv.lastOperation {
+		response.LastOperation[clientID] = operation.DCopy()
+	}
+
+	response.ConfigNum = request.ConfigNum
+}
+
+// ================
+//   SERVER STATE
+// ================
 
 func (kv *ShardKV) addResChan(idx int) (chan reply, func()) {
 	kv.resChan[idx] = make(chan reply, 1)
