@@ -1,14 +1,17 @@
 # Raft Lab
+- [Lab REQUIREMENT](./REQUIREMENT.md)
 - Link: http://nil.csail.mit.edu/6.824/2021/labs/lab-raft.html
 - Paper: http://nil.csail.mit.edu/6.824/2021/papers/raft-extended.pdf
 
 ## Run Test
-```
+```bash
+# test > 10 times to ensure consistently correct.
 ./test.sh
 ```
-- test 10 times to ensure consistently corret.
 
 ## Overview
+implement Raft, a replicated state machine protocol.
+
 ### State Transition
 ```mermaid
 stateDiagram-v2
@@ -124,7 +127,7 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
     - lock -> read result -> update state -> unlock
 
 ## 2D: log compaction
-- Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/5
+- Pull Request & test result: https://github.com/hhow09/mit-6.824/pull/6
 
 ### Overview
 - implement snapshot 
@@ -132,6 +135,10 @@ C: [{nil},{101, 1},{103, 2}, {104, 3}]
 - implement log trimming when follower receiving snapshot.
 
 ### Flows
+
+#### [Diagram](http://nil.csail.mit.edu/6.824/2021/notes/raft_diagram.pdf)
+![raft_snapshot_flow](../../assets/raft_snapshot_flow.png)
+
 #### Snapshot
 1. Application calls `Snapshot` to raft node.
     - ref: `applierSnap` of [config.go](./config.go)

@@ -1,5 +1,6 @@
 # Lab KVRaft
-- Lab and requirement: http://nil.csail.mit.edu/6.824/2021/labs/lab-kvraft.html
+- [Lab REQUIREMENT](./REQUIREMENT.md)
+- link: http://nil.csail.mit.edu/6.824/2021/labs/lab-kvraft.html
 - paper: https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf
 
 ## Part A: Key/value service without snapshots
