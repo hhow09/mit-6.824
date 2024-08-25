@@ -16,10 +16,10 @@ const (
 )
 
 const (
-	TaskStatusReady   = 0
-	TaskStatusQueue   = 1
-	TaskStatusRunning = 2
-	TaskStatusFinish  = 3
+	TaskStatusReady   = 0 // task is ready to be scheduled
+	TaskStatusQueue   = 1 // task is already in queue
+	TaskStatusRunning = 2 // task is running
+	TaskStatusFinish  = 3 // task is finished
 	TaskStatusErr     = 4
 )
 
@@ -219,7 +219,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.nReduce = nReduce
 	c.files = files
 
-	//make an buffered channel in order not to block other goroutines
+	// make an buffered channel for queing task
 	if nReduce > len(files) {
 		c.taskCh = make(chan Task, nReduce)
 	} else {

@@ -1,4 +1,7 @@
 # Lab 1: MapReduce
+- [Lab REQUIREMENT](./REQUIREMENT.md)
+- Link: http://nil.csail.mit.edu/6.824/2021/labs/lab-mr.html
+
 ## Test Script
 `main/test-mr.sh`
 
@@ -9,15 +12,13 @@
 
 #### func `MakeCoordinator`
 1. initial a Coordinator
-    - `TaskStat.Status` is all `0`/`TaskStatusReady` in Status
-    - `taskCh` is an **buffered channel** in order **not to block other goroutines**
+    - `TaskStat.Status` is all `TaskStatusReady` in Status
+    - `taskCh` is an **buffered channel** for queing task
 2. `initMapTask()`
     - set the phase to `MapPhase`
     - make slice taskStats of `len(c.files)`
-3. `tickSchedule()` run `schedule()` concurrently
-    - `schedule()`
-        - lock Coordinator
-        - iterate through taskStats: push task to `taskCh` and update `taskStats[idx]` to `TaskStatusQueue`
+3. `tickSchedule()` run `schedule()` cron job in background
+    - `schedule()`: iterate through taskStats: push task to `taskCh` and update `taskStats[idx]` to `TaskStatusQueue`
 4. Task is now available to be fetch by `Coordinator.GetOneTask`
 
 ### Worker @ MapPhase
