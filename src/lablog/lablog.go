@@ -66,9 +66,11 @@ type ShardKVLogTopic string
 
 const (
 	// shardkv
+	Montior ShardKVLogTopic = "MNTR"
 	Apply   ShardKVLogTopic = "APPL"
 	SConfig ShardKVLogTopic = "SCFG"
 	ShardOp ShardKVLogTopic = "SSOP"
+	Client  ShardKVLogTopic = "CLNT"
 )
 
 func DebugS(groupID int, serverID int, topic ShardKVLogTopic, format string, a ...interface{}) {

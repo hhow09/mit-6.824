@@ -50,12 +50,13 @@ type ShardKV struct {
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	rep := kv.handleOp(Op{
+	op := Op{
 		Type:      OpGet,
 		Key:       args.Key,
 		ClientID:  args.ClientID,
 		RequestID: args.RequestID,
-	})
+	}
+	rep := kv.handleCmd(NewOpCommand(op))
 	reply.Value = rep.Value
 	reply.Err = rep.Err
 }
@@ -74,12 +75,12 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case "Append":
 		op.Type = OpAppend
 	}
-	rep := kv.handleOp(op)
+	cmd := NewOpCommand(op)
+	rep := kv.handleCmd(cmd)
 	reply.Err = rep.Err
 }
 
-func (kv *ShardKV) handleOp(op Op) reply {
-	cmd := NewOpCommand(op)
+func (kv *ShardKV) handleCmd(cmd Command) reply {
 	idx, _, isLeader := kv.rf.Start(cmd)
 	if !isLeader {
 		return reply{Err: ErrWrongLeader}
@@ -178,7 +179,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.apply()
 	go kv.monitorConfigChange()
 	go kv.monitorPulling()
-	// TODO
+	go kv.monitorCleanup()
 
 	return kv
 }
@@ -190,7 +191,7 @@ func (kv *ShardKV) apply() {
 			kv.mu.Lock()
 			var rep reply
 			cmd := msg.Command.(Command)
-			lablog.DebugS(kv.gid, kv.me, lablog.Apply, "KVServer %d apply command %+v", kv.me, cmd)
+			lablog.DebugS(kv.gid, kv.me, lablog.Apply, "apply command %+v", cmd)
 			switch cmd.Type {
 			case CommandOp:
 				op := cmd.Data.(Op)
@@ -202,11 +203,15 @@ func (kv *ShardKV) apply() {
 			case CommandInsertShard:
 				res := cmd.Data.(ShardInterServerResponse)
 				kv.applyInsertShards(&res)
+			case CommandCleanupShard:
+				req := cmd.Data.(ShardInterServerRequest)
+				kv.applyCleanupShards(&req)
 			}
-			// only reply to CommandOp
+			// only need to reply to CommandOp and CommandCleanupShard
 			// only leader can reply
 			// since here could get the message from previous term (started by previous leader), we need to check the term
-			if currTerm, isLeader := kv.rf.GetState(); cmd.Type == CommandOp && isLeader && currTerm == int(msg.CommandTerm) {
+			if currTerm, isLeader := kv.rf.GetState(); (cmd.Type == CommandOp || cmd.Type == CommandCleanupShard) &&
+				isLeader && currTerm == int(msg.CommandTerm) {
 				ch := kv.getResChan(msg.CommandIndex)
 				kv.mu.Unlock()
 				ch <- rep
@@ -236,6 +241,8 @@ func (kv *ShardKV) apply() {
 func (kv *ShardKV) applyOp(op Op) reply {
 	shardID := key2shard(op.Key)
 	if !kv.canServeThisShard(shardID) {
+		lablog.DebugS(kv.gid, kv.me, lablog.ShardOp, "cannot serve the shard %v status[%s] op %+v, current config %v", shardID, kv.shards[shardID].GetStatus(), op, kv.currentConfig.Num)
+		lablog.DebugS(kv.gid, kv.me, lablog.ShardOp, "expected gid %v", kv.currentConfig.Shards[shardID])
 		return reply{Err: ErrWrongGroup}
 	}
 	// put and append: de duplicate write operation
@@ -271,7 +278,7 @@ func (kv *ShardKV) updateShardStatus(nextConfig *shardctrler.Config) {
 		if kv.currentConfig.Shards[i] != kv.gid && nextConfig.Shards[i] == kv.gid {
 			gid := kv.currentConfig.Shards[i]
 			if gid != 0 {
-				lablog.DebugS(kv.gid, kv.me, lablog.SConfig, "shard %d will be pulled from %d", i, gid)
+				lablog.DebugS(kv.gid, kv.me, lablog.SConfig, "shard %d will be pulled from ", i, gid)
 				kv.shards[i].SetStatus(Pulling)
 			}
 		}
@@ -332,6 +339,26 @@ func (kv *ShardKV) applyInsertShards(response *ShardInterServerResponse) {
 	}
 }
 
+// applyCleanupShards cleanup the moved shards on the state machine
+// and remove the mark (Cleaning) of new shards
+func (kv *ShardKV) applyCleanupShards(req *ShardInterServerRequest) reply {
+	if req.ConfigNum != kv.currentConfig.Num {
+		return reply{Err: ErrStaleConfig}
+	}
+	for _, shardID := range req.ShardIDs {
+		shard := kv.shards[shardID]
+		switch shard.GetStatus() {
+		case PulledByOthers:
+			lablog.DebugS(kv.gid, kv.me, lablog.Apply, "applyCleanupShards shard %d clean-uped", shardID)
+			kv.shards[shardID] = NewShard()
+		case Cleaning:
+			lablog.DebugS(kv.gid, kv.me, lablog.Apply, "applyCleanupShards shard %d serving", shardID)
+			kv.shards[shardID].SetStatus(Serving)
+		}
+	}
+	return reply{"OK", ""}
+}
+
 // ===============
 // MONITOR ROUTINE
 // ===============
@@ -383,6 +410,37 @@ func (kv *ShardKV) monitorPulling() {
 					}
 				}
 
+			}(gp.servers, gp.shardIDs, cfgNum)
+		}
+		kv.mu.RUnlock()
+		wg.Wait()
+		time.Sleep(monitorInterval)
+	}
+}
+
+// monitorCleanup cleanup the pulled shards on previous groups
+func (kv *ShardKV) monitorCleanup() {
+	for !kv.killed() {
+		kv.mu.RLock()
+		lablog.DebugS(kv.gid, kv.me, lablog.Montior, "monitorCleanup at config %d", kv.currentConfig.Num)
+		groups := kv.getGIDShardIDsByStatus(Cleaning)
+		var wg sync.WaitGroup
+		cfgNum := kv.currentConfig.Num
+		for _, gp := range groups {
+			wg.Add(1)
+			go func(servers []string, shrardIDs []int, cfgNum int) {
+				req := &ShardInterServerRequest{
+					ConfigNum: cfgNum,
+					ShardIDs:  shrardIDs,
+				}
+				for _, server := range servers {
+					srv := kv.make_end(server)
+					var resp ShardInterServerResponse
+					if srv.Call("ShardKV.CleanupRPC", req, &resp) && resp.Err == "" {
+						lablog.DebugS(kv.gid, kv.me, lablog.Montior, "server %d cleanup shard %+v", srv, req)
+						kv.rf.Start(NewCleanupShardCommand(req))
+					}
+				}
 			}(gp.servers, gp.shardIDs, cfgNum)
 		}
 		kv.mu.RUnlock()
@@ -464,7 +522,7 @@ func (kv *ShardKV) restoreSnapshot(snapshot []byte) error {
 // INTER-SERVER RPC
 // ================
 func (kv *ShardKV) PullShardRPC(request *ShardInterServerRequest, response *ShardInterServerResponse) {
-	lablog.DebugS(kv.gid, kv.me, lablog.ShardOp, "KVServer %d received PullShardRPC %+v", kv.me, request)
+	lablog.DebugS(kv.gid, kv.me, lablog.ShardOp, "ShardKV received PullShardRPC %+v", request)
 	// only pull shards from leader
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		response.Err = ErrWrongLeader
@@ -492,6 +550,32 @@ func (kv *ShardKV) PullShardRPC(request *ShardInterServerRequest, response *Shar
 	}
 
 	response.ConfigNum = request.ConfigNum
+}
+
+func (kv *ShardKV) CleanupRPC(req *ShardInterServerRequest, resp *ShardInterServerResponse) {
+	lablog.DebugS(kv.gid, kv.me, lablog.ShardOp, "ShardKV received CleanupRPC %+v", req)
+	// only pull shards from leader
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		resp.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.RLock()
+
+	if kv.currentConfig.Num < req.ConfigNum {
+		resp.Err = ErrNotReady
+		kv.mu.RUnlock()
+		return
+	}
+	if kv.currentConfig.Num > req.ConfigNum {
+		kv.mu.RUnlock()
+		return
+	}
+	kv.mu.RUnlock()
+	rep := kv.handleCmd(NewCleanupShardCommand(req))
+	lablog.DebugS(kv.gid, kv.me, lablog.ShardOp, "CleanupRPC ShardKV already cleanup shard %+v, res: %+v", req, rep)
+	if rep.Err != "" {
+		resp.Err = rep.Err
+	}
 }
 
 // ================

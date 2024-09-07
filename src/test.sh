@@ -14,4 +14,4 @@ VERBOSE=1 go test ./kvraft/... -race -run=3B -count="$TIMES" -failfast -timeout=
 VERBOSE=1 go test ./shardctrler/... -race -count="$TIMES" -failfast -timeout="$((TIMES*5))m"
 
 # shardkv
-VERBOSE=1 go test ./shardkv/... -race -run="(TestStaticShards)" -count="$TIMES" -failfast -timeout="$((TIMES*5))m"
+VERBOSE=2 go test ./shardkv/... -race -run="(TestStaticShards)" -count="$TIMES" -failfast -timeout="$((TIMES*5))m"

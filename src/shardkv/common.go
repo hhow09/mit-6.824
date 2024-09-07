@@ -26,9 +26,10 @@ type Err string
 type CommandType string
 
 const (
-	CommandOp          CommandType = "Op"
-	CommandConfig      CommandType = "Config"
-	CommandInsertShard CommandType = "InsertShard"
+	CommandOp           CommandType = "Op"
+	CommandConfig       CommandType = "Config"
+	CommandInsertShard  CommandType = "InsertShard"
+	CommandCleanupShard CommandType = "CleanupShard"
 )
 
 // implement stringer
@@ -95,6 +96,13 @@ func NewInsertShardCommand(res ShardInterServerResponse) Command {
 	return Command{
 		Type: CommandInsertShard,
 		Data: res,
+	}
+}
+
+func NewCleanupShardCommand(req *ShardInterServerRequest) Command {
+	return Command{
+		Type: CommandCleanupShard,
+		Data: *req,
 	}
 }
 
