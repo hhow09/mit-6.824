@@ -61,3 +61,30 @@ func Debug(serverId int, topic LogTopic, format string, a ...interface{}) {
 		log.Printf(format, a...)
 	}
 }
+
+type ShardKVLogTopic string
+
+const (
+	// shardkv
+	Montior ShardKVLogTopic = "MNTR"
+	Apply   ShardKVLogTopic = "APPL"
+	SConfig ShardKVLogTopic = "SCFG"
+	ShardOp ShardKVLogTopic = "SSOP"
+	Client  ShardKVLogTopic = "CLNT"
+)
+
+func DebugS(groupID int, serverID int, topic ShardKVLogTopic, format string, a ...interface{}) {
+	if debugVerbosity == 2 {
+		time := time.Since(debugStart).Microseconds()
+		time /= 100
+		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
+		if groupID >= 0 {
+			prefix += fmt.Sprintf("G%d ", groupID)
+		}
+		if serverID >= 0 {
+			prefix += fmt.Sprintf("S%d ", serverID)
+		}
+		format = prefix + format
+		log.Printf(format, a...)
+	}
+}
